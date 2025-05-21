@@ -12,6 +12,7 @@
         "applications_notifications",
         "battery",
         "bluetooth",
+        "locations"
     ],
     "output_file": "./SS_ID_111_output.txt",
     "daily_output_dir": "./daily_description_SS_ID_111",
