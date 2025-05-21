@@ -1,3 +1,4 @@
 20250521
 - Added 'locations' in 'Sensors' in config.yaml
 - Added .gitignore, changes.txt, and requirements.txt
+- Added config.yaml to .gitignore
