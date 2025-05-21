@@ -17,7 +17,7 @@
     "output_file": "./SS_ID_111_output.txt",
     "daily_output_dir": "./daily_description_SS_ID_111",
     "DISCARD_SYSTEM_UI": "true",
-    "GOOGLE_MAP_KEY": "",
+    "GOOGLE_MAP_KEY": "test",
     "hierarchy_linkage": "complete", # longest distance between location clusters, complete=longest, single=shortest
     "night_time_start": "20", # Start of nighttime in 24-hour format, used for determining home location  
     "night_time_end": "4",  # End of nighttime in 24-hour format, used for determining home location  
