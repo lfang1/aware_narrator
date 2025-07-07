@@ -1,4 +1,4 @@
-20250521
-- Added 'locations' in 'Sensors' in config.yaml
-- Added .gitignore, changes.txt, and requirements.txt
-- Added config.yaml to .gitignore
+20250707
+- Added aware_narrator.py, extract_sessions.py, split_description, json2jsonl.py, map_pid_deviceid.py
+- Updated config.yaml
+- Added environment configuration files: environment.yml and requirements.txt
