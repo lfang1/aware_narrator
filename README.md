@@ -70,6 +70,8 @@ The project includes several Python scripts:
 - **`extract_sessions.py`** - Extracts session boundaries from screen on/off events
 - **`json2jsonl.py`** - Utility to convert JSON files to JSONL format
 - **`split_description.py`** - Splits output narratives by sensor type
+- **`map_pid_deviceid.py`** - Generate the participant ID to device ID mapping file.
+
 
 ## Configuration File (`config.yaml`)
 The scripts require a YAML configuration file with the following structure:
