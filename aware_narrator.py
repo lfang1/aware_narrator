@@ -79,6 +79,9 @@ os.makedirs(os.path.dirname(output_file), exist_ok=True)
 
 jsonl_files = [(f"{sensor}.jsonl", sensor) for sensor in sensors]
 
+blacklist_apps = CONFIG["blacklist_apps"]
+whitelist_system_apps = CONFIG["whitelist_system_apps"]
+
 application_name_list = {}
 sensor_narratives = {}
 prev_battery_status = None
@@ -485,7 +488,7 @@ def generate_app_usage_summary_by_timewindow(app_data, sensor_name, time_window_
         if not window_apps:
             current_window_start = current_window_end
             continue
-        
+
         # Calculate app usage statistics for this time window
         app_usage = {}
         
@@ -497,9 +500,13 @@ def generate_app_usage_summary_by_timewindow(app_data, sensor_name, time_window_
             # Map package name to application name if available
             if package_name in application_name_list:
                 app_name = application_name_list[package_name]
+
+            # Check if app is in blacklist (skip if found)
+            if any(app_name.lower() == app.lower() for app in blacklist_apps):
+                continue
             
-            # Skip system apps if configured to discard
-            if DISCARD_SYSTEM_UI and is_system_app == 1:
+            # Skip system apps if configured to discard. Exclude apps in a whitelist of system apps
+            if DISCARD_SYSTEM_UI and is_system_app == 1 and not any(app_name.lower() == app.lower() for app in whitelist_system_apps):
                 continue
                 
             if app_name not in app_usage:
@@ -1630,8 +1637,12 @@ def generate_integrated_description(sensor_data, sensor_name, start_timestamp, e
     # WiFi sensors are now handled separately in the main loop with combined processing
     elif sensor_name == "screen":
         return describe_screen_integrated(sensor_data, sensor_name, start_timestamp, end_timestamp, sessions)
+    elif sensor_name == "screentext":
+        return describe_screentext_integrated(sensor_data, sensor_name, start_timestamp, end_timestamp, sessions)
     elif sensor_name == "calls":
         return describe_calls_integrated(sensor_data, sensor_name, start_timestamp, end_timestamp, sessions)
+    elif sensor_name == "installations":
+        return describe_installations_integrated(sensor_data, sensor_name, start_timestamp, end_timestamp, sessions)
     elif sensor_name == "messages":
         return describe_messages_integrated(sensor_data, sensor_name, start_timestamp, end_timestamp, sessions)
     elif sensor_name == "applications_notifications":
@@ -2063,6 +2074,10 @@ def describe_keyboard_integrated(sensor_data, sensor_name, start_timestamp, end_
             
             # Map package name to application name if available
             app_name = application_name_list.get(package_name, package_name)
+
+            #check if app is blacklisted
+            if any(app_name.lower() == app.lower() for app in blacklist_apps):
+                continue
             
             # Find matching session
             session_id = find_matching_session(timestamp, sessions_data, window_start, window_end)
@@ -2172,7 +2187,22 @@ def describe_keyboard_integrated(sensor_data, sensor_name, start_timestamp, end_
                 if len(final_text) <= 2 and duration_seconds > 60:
                     continue
                 
-
+                # Only include typing periods that START within this window
+                if period['start_timestamp'] < window_start:
+                    continue
+                
+                # Check if this typing session extends beyond the current window
+                extends_note = ""
+                if period['end_timestamp'] > window_end:
+                    # Calculate how many windows this typing session extends into
+                    window_size_ms = 60 * 60 * 1000  # 60 minutes in milliseconds
+                    windows_after_current = int((period['end_timestamp'] - window_end) / window_size_ms) + 1
+                    
+                    # Format the note with correct pluralization
+                    if windows_after_current == 1:
+                        extends_note = f" → extends to the following window until {period['end_time'].split(' ')[1]}"
+                    else:
+                        extends_note = f" → extends to the following {windows_after_current} windows until {period['end_time'].split(' ')[1]}"
                 
                 if duration_seconds < 60:
                     duration_str = f"{int(duration_seconds)} seconds"
@@ -2219,10 +2249,10 @@ def describe_keyboard_integrated(sensor_data, sensor_name, start_timestamp, end_
                 if len(clean_text) > 100:
                     display_text = clean_text[:97] + "..."
                 
-                # Create enhanced description with typing metrics
+                # Create enhanced description with typing metrics and extends note
                 description = (
                     f"{period['start_time']} | Typed{app_desc}{session_info} "
-                    f"for {duration_str}: \"{display_text}\""
+                    f"for {duration_str}: \"{display_text}\"{extends_note}"
                 )
                 
                 keyboard_descriptions.append({
@@ -2433,8 +2463,8 @@ def describe_keyboard_integrated(sensor_data, sensor_name, start_timestamp, end_
                         "typos": []
                     }
                     
-                    # Add screen session info (always include for consistency)
-                    period_data["screen_session"] = desc['session_id']
+                    # Uncomment to add screen session info (always include for consistency)
+                    # period_data["screen_session"] = desc['session_id']
                     
                     # Add detailed typo information with original formatting
                     for pattern in desc['correction_patterns']:
@@ -2473,55 +2503,99 @@ def describe_keyboard_integrated(sensor_data, sensor_name, start_timestamp, end_
 
 def sort_narratives_by_time_window_and_sensor_order(all_narratives):
     """
-    Sort narratives by time window and then by desired sensor order within each window.
-    Order within each time window: battery, bluetooth, wifi, locations, applications_foreground, keyboard, calls, messages
+    Sort narratives by time window and then by category-based sensor order within each window.
+    
+    Categories and order:
+    1. Environmental context: locations, wifi, bluetooth
+    2. Communication events: notifications, calls, messages  
+    3. Device state: battery, installations
+    4. Engagement signals: screen, applications, keyboard, screentext
     
     Args:
         all_narratives (list): List of (datetime_str, description) tuples
         
     Returns:
-        list: Sorted list of (datetime_str, description) tuples
+        list: Sorted list of (datetime_str, description) tuples with category headers
     """
     from collections import defaultdict
     
-    # Define sensor order priority
-    sensor_order = {
-        'battery': 1,
-        'bluetooth': 2,
-        'wifi': 3,
-        'locations': 4,
-        'applications': 5,  # This will match "applications" in the description
-        'keyboard': 6,
-        'calls': 7,
-        'messages': 8
+    # Define sensor categories and their order
+    sensor_categories = {
+        # Environmental context
+        'locations': 'environmental_context',
+        'wifi': 'environmental_context',
+        'bluetooth': 'environmental_context',
+        # Communication events
+        'notifications': 'communication_events',
+        'calls': 'communication_events',
+        'messages': 'communication_events',
+        # Device state
+        'battery': 'device_state',
+        'installations': 'device_state',
+        # Engagement signals
+        'screen': 'engagement_signals',
+        'applications': 'engagement_signals',
+        'keyboard': 'engagement_signals',
+        'screentext': 'engagement_signals'
+    }
+    
+    # Define category order and display names
+    category_order = [
+        'environmental_context',
+        'communication_events', 
+        'device_state',
+        'engagement_signals'
+    ]
+    
+    category_display_names = {
+        'environmental_context': 'Environmental Context',
+        'communication_events': 'Communication Events',
+        'device_state': 'Device State',
+        'engagement_signals': 'Engagement Signals'
     }
     
     def get_sensor_type(description):
         """Extract sensor type from description."""
-        if ' | battery | ' in description:
-            return 'battery'
-        elif ' | bluetooth | ' in description:
-            return 'bluetooth'
+        if ' | locations | ' in description:
+            return 'locations'
         elif ' | wifi | ' in description:
             return 'wifi'
-        elif ' | locations | ' in description:
-            return 'locations'
-        elif ' | applications | ' in description:
-            return 'applications'
-        elif ' | keyboard | ' in description:
-            return 'keyboard'
+        elif ' | bluetooth | ' in description:
+            return 'bluetooth'
+        elif ' | notifications | ' in description:
+            return 'notifications'
         elif ' | calls | ' in description:
             return 'calls'
         elif ' | messages | ' in description:
             return 'messages'
+        elif ' | battery | ' in description:
+            return 'battery'
+        elif ' | installations | ' in description:
+            return 'installations'
+        elif ' | screen | ' in description:
+            return 'screen'
+        elif ' | applications | ' in description:
+            return 'applications'
+        elif ' | keyboard | ' in description:
+            return 'keyboard'
+        elif ' | screentext | ' in description:
+            return 'screentext'
         else:
             # For other sensors, assign a default high priority to appear after main sensors
             return 'other'
     
-    def get_sensor_priority(description):
-        """Get sorting priority for sensor type."""
+    def get_sensor_category(description):
+        """Get category for sensor type."""
         sensor_type = get_sensor_type(description)
-        return sensor_order.get(sensor_type, 99)  # Default high number for unknown sensors
+        return sensor_categories.get(sensor_type, 'other')
+    
+    def get_category_priority(description):
+        """Get category priority for sorting."""
+        category = get_sensor_category(description)
+        try:
+            return category_order.index(category)
+        except ValueError:
+            return len(category_order)  # Put unknown categories at the end
     
     # Group narratives by time window (datetime string)
     time_window_groups = defaultdict(list)
@@ -2529,15 +2603,69 @@ def sort_narratives_by_time_window_and_sensor_order(all_narratives):
     for datetime_str, description in all_narratives:
         time_window_groups[datetime_str].append((datetime_str, description))
     
-    # Sort within each time window by sensor order
+    # Sort within each time window by category and create formatted output
     sorted_narratives = []
+    window_number = 1
+    
     for time_window in sorted(time_window_groups.keys()):
         window_narratives = time_window_groups[time_window]
         
-        # Sort this window's narratives by sensor priority
-        window_narratives.sort(key=lambda x: get_sensor_priority(x[1]))
+        # Sort this window's narratives by category priority
+        window_narratives.sort(key=lambda x: get_category_priority(x[1]))
         
-        sorted_narratives.extend(window_narratives)
+        # Add newline before time window (except for the first one)
+        if sorted_narratives:
+            sorted_narratives.append((time_window, ""))
+        
+        # Create time range header with window number and day information
+        time_window_dt = pd.to_datetime(time_window)
+        next_window_dt = time_window_dt + pd.Timedelta(minutes=sensor_integration_time_window)
+        
+        # Check if the window spans across days
+        if time_window_dt.date() == next_window_dt.date():
+            # Same day
+            day_name = time_window_dt.strftime('%A')
+            day_info = f"Day {time_window_dt.strftime('%Y-%m-%d')} ({day_name})"
+            time_range = f"{time_window_dt.strftime('%H:%M:%S')} - {next_window_dt.strftime('%H:%M:%S')}"
+        else:
+            # Crosses midnight to next day
+            start_day_name = time_window_dt.strftime('%A')
+            end_day_name = next_window_dt.strftime('%A')
+            day_info = f"Day {time_window_dt.strftime('%Y-%m-%d')} ({start_day_name}) to {next_window_dt.strftime('%Y-%m-%d')} ({end_day_name})"
+            time_range = f"{time_window_dt.strftime('%H:%M:%S')} - {next_window_dt.strftime('%H:%M:%S')}"
+        
+        time_range_header = f"Window {window_number}\n{day_info}\n{time_range}"
+        sorted_narratives.append((time_window, time_range_header))
+        
+        window_number += 1
+        
+        # Group by category and add headers
+        current_category = None
+        for datetime_str, description in window_narratives:
+            category = get_sensor_category(description)
+            
+            # Add category header if this is a new category
+            if category != current_category and category in category_display_names:
+                current_category = category
+                # Add newline before category header
+                sorted_narratives.append((time_window, ""))
+                category_header = category_display_names[category]
+                sorted_narratives.append((time_window, category_header))
+            
+            # Remove timestamp prefix from description and add dash prefix
+            if ' | ' in description:
+                # Extract the part after the timestamp
+                description_parts = description.split(' | ', 2)
+                if len(description_parts) >= 3:
+                    sensor_type = description_parts[1]
+                    content = description_parts[2]
+                    formatted_description = f"- {sensor_type} | {content}"
+                else:
+                    formatted_description = f"- {description}"
+            else:
+                formatted_description = f"- {description}"
+            
+            sorted_narratives.append((time_window, formatted_description))
     
     return sorted_narratives
 
@@ -4844,6 +4972,408 @@ def get_sensor_wifi_basic_analysis(window_data, datetime_str, window_start, wind
      
     return '\n'.join(description_parts)
 
+def describe_screentext_integrated(sensor_data, sensor_name, start_timestamp, end_timestamp, sessions=None):
+    """
+    Generate integrated screentext analysis by time windows.
+    Loads screentext data from the config file and processes screen text logs and app usage durations.
+    
+    Important: The session_id in screentext data has been renumbered (to avoid gaps) and does NOT 
+    correspond to the original session_id in sessions.jsonl. Session correlation is performed 
+    using timestamp overlap between screentext records and original sessions only.
+    
+    Args:
+        sensor_data (list): Unused - we load data from config file
+        sensor_name (str): Name of the sensor (should be 'screentext')
+        start_timestamp (float): Start timestamp in milliseconds
+        end_timestamp (float): End timestamp in milliseconds
+        sessions (list, optional): List of original session records for session correlation
+        
+    Returns:
+        list: List of formatted screentext narrative tuples (datetime, description)
+    """
+    print("Generating integrated description for screentext")
+    
+    if sensor_name != "screentext":
+        print("Invalid sensor name for screentext integration")
+        return []
+    
+    # Load screentext data from config file
+    cleaned_screentext_file = CONFIG.get("cleaned_screentext_file", "").format(P_ID=P_ID)
+    if not cleaned_screentext_file or not os.path.exists(cleaned_screentext_file):
+        print(f"Screentext file not found: {cleaned_screentext_file}")
+        return []
+    
+    # Load and parse screentext data
+    screentext_records = []
+    try:
+        with open(cleaned_screentext_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        session_record = json.loads(line)
+                        # Extract screentext logs from the session record
+                        if 'screen_text_logs' in session_record:
+                            for text_log in session_record['screen_text_logs']:
+                                # Add session_id to each text log for reference
+                                text_log['session_id'] = session_record.get('session_id', 'Unknown')
+                                screentext_records.append(text_log)
+                    except json.JSONDecodeError:
+                        continue
+    except Exception as e:
+        print(f"Error loading screentext data: {e}")
+        return []
+    
+    if not screentext_records:
+        print("No screentext records found")
+        return []
+    
+    # Filter records within the time range and add timestamp field
+    filtered_records = []
+    for record in screentext_records:
+        try:
+            start_timestamp_record = convert_timestring_to_timestamp(record.get('start_datetime', ''), CONFIG["timezone"])
+            end_timestamp_record = convert_timestring_to_timestamp(record.get('end_datetime', ''), CONFIG["timezone"])
+            
+            # Include records that:
+            # 1. Start within the time range, OR
+            # 2. End within the time range, OR  
+            # 3. Span across the time range (start before and end after)
+            if ((start_timestamp <= start_timestamp_record < end_timestamp) or
+                (start_timestamp <= end_timestamp_record < end_timestamp) or
+                (start_timestamp_record < start_timestamp and end_timestamp_record > end_timestamp)):
+                
+                # Add timestamp field for compatibility with process_sensor_by_timewindow
+                record['timestamp'] = start_timestamp_record
+                filtered_records.append(record)
+        except:
+            continue
+    
+    if not filtered_records:
+        print("No screentext records in time range")
+        return []
+    
+    def process_screentext_window(window_data, datetime_str, window_start, window_end):
+        """Process screentext data for a single time window."""
+        if not window_data:
+            return None
+        
+        # Sort window data by start time
+        sorted_data = sorted(window_data, key=lambda x: x.get('start_datetime', ''))
+        
+        # Group by active period and app
+        active_period_groups = {}
+        total_screen_time = 0
+        
+        for record in sorted_data:
+            app_name = record.get('application_name', 'Unknown')
+            duration = record.get('duration_seconds', 0)
+            text = record.get('text', '')
+            is_system_app = record.get('is_system_app', False)
+            start_datetime = record.get('start_datetime', '')
+            end_datetime = record.get('end_datetime', '')
+            active_period_id = record.get('active_period_id', '')
+
+            # Skip blacklisted apps
+            if any(app_name.lower() == app.lower() for app in blacklist_apps):
+                continue
+            
+            # Uncomment to skip system apps excluding whitelisted apps
+            # if DISCARD_SYSTEM_UI and is_system_app == 1 and not any(app_name.lower() == app.lower() for app in whitelist_system_apps):
+            #     continue
+            
+            if not text.strip():
+                continue
+            
+            # Create unique key for active period + app combination
+            period_key = f"{active_period_id}_{app_name}"
+            
+            # Initialize period group if not exists
+            if period_key not in active_period_groups:
+                active_period_groups[period_key] = {
+                    'app_name': app_name,
+                    'start_datetime': start_datetime,
+                    'end_datetime': end_datetime,
+                    'duration_seconds': duration,
+                    'texts': []
+                }
+            else:
+                # Update end time and duration if this record extends the period
+                if end_datetime > active_period_groups[period_key]['end_datetime']:
+                    active_period_groups[period_key]['end_datetime'] = end_datetime
+                    active_period_groups[period_key]['duration_seconds'] += duration
+                else:
+                    active_period_groups[period_key]['duration_seconds'] += duration
+            
+            # Add to total screen time
+            total_screen_time += duration
+            
+            # Add text to the period
+            active_period_groups[period_key]['texts'].append(text.strip())
+        
+        # Return None if no content after filtering (don't display empty windows)
+        if total_screen_time == 0:
+            return None
+        
+        # Generate description
+        description_parts = [f"{datetime_str} | screentext | Tracked Logs"]
+        
+        # Format total screen time
+        if total_screen_time >= 3600:
+            hours = int(total_screen_time // 3600)
+            minutes = int((total_screen_time % 3600) // 60)
+            seconds = int(total_screen_time % 60)
+            time_str = f"{hours}h {minutes}m {seconds}s"
+        elif total_screen_time >= 60:
+            minutes = int(total_screen_time // 60)
+            seconds = int(total_screen_time % 60)
+            time_str = f"{minutes}m {seconds}s"
+        else:
+            time_str = f"{int(total_screen_time)}s"
+        
+        # uncomment to show screen text tracked time
+        # description_parts.append(f"    - Screen text tracked time: {time_str}")
+        
+        # Count unique apps
+        unique_apps = set(period['app_name'] for period in active_period_groups.values())
+        description_parts.append(f"    - Apps tracked: {len(unique_apps)}")
+        
+        # Screen text logs in new format
+        description_parts.append("    - Screen text logs breakdown:")
+        
+        # Sort periods by start time
+        sorted_periods = sorted(active_period_groups.values(), key=lambda x: x['start_datetime'])
+        
+        for period in sorted_periods:
+            app_name = period['app_name']
+            start_dt = period['start_datetime']
+            end_dt = period['end_datetime']
+            duration = period['duration_seconds']
+            
+            # Check if this period extends beyond the current window
+            period_start_ts = convert_timestring_to_timestamp(start_dt, CONFIG["timezone"])
+            period_end_ts = convert_timestring_to_timestamp(end_dt, CONFIG["timezone"])
+            extends_beyond_window = period_end_ts > window_end
+            
+            # Format duration
+            if duration >= 3600:
+                hours = int(duration // 3600)
+                minutes = int((duration % 3600) // 60)
+                seconds = int(duration % 60)
+                duration_str = f"{hours}h {minutes}m {seconds}s"
+            elif duration >= 60:
+                minutes = int(duration // 60)
+                seconds = int(duration % 60)
+                duration_str = f"{minutes}m {seconds}s"
+            else:
+                duration_str = f"{int(duration)}s"
+            
+            # Add note if period extends beyond window
+            period_line = f"        - {app_name} ({start_dt} - {end_dt}, {duration_str})"
+            if extends_beyond_window:
+                period_line += " (extends to following windows)"
+            description_parts.append(period_line)
+            
+            # Add all texts for this period
+            for text in period['texts']:
+                # Create JSON format for the text
+                text_json = json.dumps(text, ensure_ascii=False)
+                description_parts.append(f"            - Text: {text_json}")
+        
+        # Show session correlation if sessions are available
+        if sessions:
+            # Find sessions that overlap with this window
+            overlapping_sessions = []
+            for session in sessions:
+                if (session['start_timestamp'] <= window_end and 
+                    session['end_timestamp'] >= window_start):
+                    overlapping_sessions.append(session['session_id'])
+            
+            if overlapping_sessions:
+                if len(overlapping_sessions) == 1:
+                    description_parts.append(f"    - Session activity: Session {overlapping_sessions[0]}")
+                else:
+                    description_parts.append(f"    - Session activity: Sessions {', '.join(map(str, overlapping_sessions))}")
+        
+        return '\n'.join(description_parts)
+    
+    # Process data using the shared helper function
+    narratives = process_sensor_by_timewindow(
+        filtered_records, sensor_name, start_timestamp, end_timestamp, process_screentext_window
+    )
+    
+    print(f"Generated {len(narratives)} screentext narratives (window size: {sensor_integration_time_window} minutes)")
+    return narratives
+
+def describe_installations_integrated(sensor_data, sensor_name, start_timestamp, end_timestamp, sessions=None):
+    """
+    Generate integrated app installation analysis by time windows.
+    Shows installation, removal, and update activities with app names and timing.
+    
+    Args:
+        sensor_data (list): List of installations sensor records
+        sensor_name (str): Name of the sensor (should be 'installations')
+        start_timestamp (float): Start timestamp in milliseconds
+        end_timestamp (float): End timestamp in milliseconds
+        sessions (list, optional): List of session records for session correlation
+        
+    Returns:
+        list: List of formatted installations narrative tuples (datetime, description)
+    """
+    print("Generating integrated description for installations")
+    
+    if sensor_name != "installations" or not sensor_data:
+        print("No installations data available, skipping installations integration")
+        return []
+    
+    # Installation status mapping
+    statuses = {
+        0: "was removed",
+        1: "was added", 
+        2: "was updated"
+    }
+    
+    def process_installations_window(window_data, datetime_str, window_start, window_end):
+        """Process installations data for a single time window."""
+        if not window_data:
+            return None
+        
+        # Sort window data by timestamp
+        sorted_data = sorted(window_data, key=lambda x: x['timestamp'])
+        
+        # Track installations by status
+        installation_activities = {
+            'added': [],
+            'removed': [],
+            'updated': []
+        }
+        
+        total_activities = 0
+        
+        # Process each installation record
+        for record in sorted_data:
+            app_name = record.get('application_name', 'Unknown')
+            installation_status = record.get('installation_status', -1)
+            package_name = record.get('package_name', '')
+            record_datetime = record.get('datetime', datetime_str)
+            
+            # Map status to readable format
+            if installation_status == 0:
+                status = "removed"
+                installation_activities['removed'].append({
+                    'app_name': app_name,
+                    'package_name': package_name,
+                    'datetime': record_datetime
+                })
+            elif installation_status == 1:
+                status = "added"
+                installation_activities['added'].append({
+                    'app_name': app_name,
+                    'package_name': package_name,
+                    'datetime': record_datetime
+                })
+            elif installation_status == 2:
+                status = "updated"
+                installation_activities['updated'].append({
+                    'app_name': app_name,
+                    'package_name': package_name,
+                    'datetime': record_datetime
+                })
+            else:
+                # Unknown status, skip
+                continue
+            
+            total_activities += 1
+        
+        if total_activities == 0:
+            return None
+        
+        # Generate description for this window
+        description_parts = [f"{datetime_str} | installations | App Installation Activity"]
+        
+        # Show total activities summary
+        description_parts.append(f"    - Total activities: {total_activities}")
+        
+        # Show breakdown by type
+        activity_breakdown = []
+        for status, activities in installation_activities.items():
+            if activities:
+                activity_breakdown.append(f"{len(activities)} {status}")
+        
+        if activity_breakdown:
+            description_parts.append(f"    - Activity breakdown: {', '.join(activity_breakdown)}")
+        
+        # Show detailed activities by type
+        for status, activities in installation_activities.items():
+            if activities:
+                description_parts.append(f"    - Apps {status}:")
+                
+                # Sort by datetime for chronological order
+                sorted_activities = sorted(activities, key=lambda x: x['datetime'])
+                
+                for activity in sorted_activities:
+                    app_name = activity['app_name']
+                    package_name = activity['package_name']
+                    activity_time = activity['datetime'].split(' ')[1] if ' ' in activity['datetime'] else activity['datetime']
+                    
+                    # Handle empty or missing application names
+                    if not app_name or app_name.strip() == '':
+                        if package_name:
+                            display_name = f"Unknown App ({package_name})"
+                        else:
+                            display_name = "Unknown App"
+                    else:
+                        display_name = app_name
+                    
+                    if package_name and package_name != app_name and app_name.strip():
+                        description_parts.append(f"         - {display_name} ({package_name}) at {activity_time}")
+                    else:
+                        description_parts.append(f"         - {display_name} at {activity_time}")
+        
+        # Show timing patterns if multiple activities
+        if total_activities > 1:
+            # Calculate time span
+            first_activity = sorted_data[0]
+            last_activity = sorted_data[-1]
+            
+            first_time = first_activity.get('datetime', datetime_str).split(' ')[1]
+            last_time = last_activity.get('datetime', datetime_str).split(' ')[1]
+            
+            if first_time != last_time:
+                description_parts.append(f"    - Time span: {first_time} to {last_time}")
+            
+            # Show activity frequency
+            time_window_minutes = sensor_integration_time_window
+            activities_per_minute = total_activities / time_window_minutes
+            if activities_per_minute > 1:
+                description_parts.append(f"    - Frequency: {activities_per_minute:.1f} activities/minute")
+            else:
+                description_parts.append(f"    - Frequency: {total_activities} activities in {time_window_minutes} minutes")
+        
+        # Show session correlation if sessions are available
+        if sessions:
+            # Find sessions that overlap with this window
+            overlapping_sessions = []
+            for session in sessions:
+                if (session['start_timestamp'] <= window_end and 
+                    session['end_timestamp'] >= window_start):
+                    overlapping_sessions.append(session['session_id'])
+            
+            if overlapping_sessions:
+                if len(overlapping_sessions) == 1:
+                    description_parts.append(f"    - Session activity: Session {overlapping_sessions[0]}")
+                else:
+                    description_parts.append(f"    - Session activity: Sessions {', '.join(map(str, overlapping_sessions))}")
+        
+        return '\n'.join(description_parts)
+    
+    # Process data using the shared helper function
+    narratives = process_sensor_by_timewindow(
+        sensor_data, sensor_name, start_timestamp, end_timestamp, process_installations_window
+    )
+    
+    print(f"Generated {len(narratives)} installations narratives (window size: {sensor_integration_time_window} minutes)")
+    return narratives
 
 if __name__ == "__main__":
     print("Start narrating sensor data...")

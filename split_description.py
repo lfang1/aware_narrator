@@ -2,6 +2,7 @@
 """
 Script to split sensor data by sensor type from SS010_output.txt
 Each sensor type gets its own file in the splitted_output folder
+Updated to work with new format including window headers and category headers
 """
 
 import os
@@ -32,10 +33,16 @@ def split_sensor_data(input_file, output_folder):
     # Dictionary to store lines for each sensor type
     sensor_data = defaultdict(list)
     
-    # Regular expression to match timestamp pattern (YYYY-MM-DD HH:MM:SS)
-    timestamp_pattern = re.compile(r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}')
+    # Regular expressions to match different line types
+    window_pattern = re.compile(r'^Window \d+')
+    day_pattern = re.compile(r'^Day \d{4}-\d{2}-\d{2}')
+    time_range_pattern = re.compile(r'^\d{2}:\d{2}:\d{2} - \d{2}:\d{2}:\d{2}')
+    category_pattern = re.compile(r'^(Environmental Context|Communication Events|Device State|Engagement Signals)$')
+    sensor_pattern = re.compile(r'^- (\w+) \| (.+)')
     
-    # Variables to track current sensor entry
+    # Variables to track current context
+    current_window_info = None
+    current_category = None
     current_sensor_type = None
     current_line_parts = []
     
@@ -48,25 +55,71 @@ def split_sensor_data(input_file, output_folder):
                 if not line.strip():  # Skip empty lines
                     continue
                 
-                # Check if this line starts with a timestamp
-                if timestamp_pattern.match(line):
-                    # This is a new sensor entry
-                    # First, save the previous entry if it exists
+                # Check for window header
+                if window_pattern.match(line):
+                    # Save previous sensor entry if it exists
                     if current_sensor_type and current_line_parts:
                         complete_line = '\n'.join(current_line_parts)
                         sensor_data[current_sensor_type].append(complete_line)
-                    
-                    # Parse the new line
-                    parts = line.split(' | ')
-                    if len(parts) >= 3:
-                        current_sensor_type = parts[1].strip()
-                        current_line_parts = [line]
-                    else:
-                        print(f"Warning: Line {line_num} has unexpected format: {line}")
-                        current_sensor_type = None
                         current_line_parts = []
+                    
+                    current_window_info = line
+                    current_category = None
+                    current_sensor_type = None
+                    continue
+                
+                # Check for day information
+                if day_pattern.match(line):
+                    if current_window_info:
+                        current_window_info += '\n' + line
+                    continue
+                
+                # Check for time range
+                if time_range_pattern.match(line):
+                    if current_window_info:
+                        current_window_info += '\n' + line
+                    continue
+                
+                # Check for category header
+                if category_pattern.match(line):
+                    current_category = line
+                    # Save previous sensor entry if it exists
+                    if current_sensor_type and current_line_parts:
+                        complete_line = '\n'.join(current_line_parts)
+                        sensor_data[current_sensor_type].append(complete_line)
+                        current_line_parts = []
+                    current_sensor_type = None
+                    continue
+                
+                # Check for sensor description (starts with dash)
+                sensor_match = sensor_pattern.match(line)
+                if sensor_match:
+                    # Save previous sensor entry if it exists
+                    if current_sensor_type and current_line_parts:
+                        complete_line = '\n'.join(current_line_parts)
+                        sensor_data[current_sensor_type].append(complete_line)
+                        current_line_parts = []
+                    
+                    # Parse the new sensor entry
+                    sensor_type = sensor_match.group(1)
+                    content = sensor_match.group(2)
+                    
+                    # Create the formatted line with window and category context
+                    formatted_line_parts = []
+                    if current_window_info:
+                        formatted_line_parts.append(current_window_info)
+                    if current_category:
+                        formatted_line_parts.append(current_category)
+                    
+                    # Add the sensor description in the old format for compatibility
+                    formatted_line = f"Window Context | {sensor_type} | {content}"
+                    if formatted_line_parts:
+                        formatted_line = '\n'.join(formatted_line_parts) + '\n' + formatted_line
+                    
+                    current_sensor_type = sensor_type
+                    current_line_parts = [formatted_line]
                 else:
-                    # This is a continuation line
+                    # This is a continuation line for the current sensor
                     if current_sensor_type and current_line_parts:
                         current_line_parts.append(line)
                     else:
