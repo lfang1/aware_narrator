@@ -121,12 +121,8 @@ sensors:
   - "sensor_wifi"
   - "locations"
 
-# location sampling rate
-frequency_gps: 180 # seconds
-frequency_network: 300 # seconds
-
 DISCARD_SYSTEM_UI: true
-GOOGLE_MAP_KEY: ""
+GOOGLE_MAP_KEY: "" # Used for Google API Reverse geocoding
 eps: 0.0000078  # DBSCAN clustering parameter: ~50m radius (0.0000078 radians × 6371000 m ≈ 50m)
 min_samples: 5  # DBSCAN clustering parameter: require at least 3 points to form a cluster
 night_time_start: 22 # Start of nighttime in 24-hour format, used for determining home location  
