@@ -1826,12 +1826,10 @@ def describe_applications_notifications_integrated(sensor_data, sensor_name, sta
         app_notifications = {}
         total_notifications = 0
         notifications_with_content = 0
-        notifications_with_title = 0
         
         # Process each notification record
         for record in sorted_data:
             app_name = record.get('application_name', 'Unknown')
-            title = record.get('title', '')
             text = record.get('text', '')
             package_name = record.get('package_name', '')
             record_datetime = record.get('datetime', datetime_str)
@@ -1843,9 +1841,7 @@ def describe_applications_notifications_integrated(sensor_data, sensor_name, sta
                     'package_name': package_name,
                     'notifications': [],
                     'has_content': 0,
-                    'has_title': 0,
-                    'sample_titles': [],
-                    'sample_texts': []
+                    'full_texts': []
                 }
             
             # Update app statistics
@@ -1853,24 +1849,16 @@ def describe_applications_notifications_integrated(sensor_data, sensor_name, sta
             app_notifications[app_name]['notifications'].append({
                 'datetime': record_datetime,
                 'timestamp': record.get('timestamp', 0),
-                'title': title,
                 'text': text
             })
             
             # Track content statistics
-            if title and title.strip():
-                app_notifications[app_name]['has_title'] += 1
-                notifications_with_title += 1
-                # Keep sample titles (up to 3 unique ones)
-                if title not in app_notifications[app_name]['sample_titles'] and len(app_notifications[app_name]['sample_titles']) < 3:
-                    app_notifications[app_name]['sample_titles'].append(title)
-            
-            if text and text.strip() and not (text.startswith('[') and text.endswith(']')):
+            if text and text.strip() and text != "[]":
                 app_notifications[app_name]['has_content'] += 1
                 notifications_with_content += 1
-                # Keep sample texts (up to 3 unique ones)
-                if text not in app_notifications[app_name]['sample_texts'] and len(app_notifications[app_name]['sample_texts']) < 3:
-                    app_notifications[app_name]['sample_texts'].append(text)
+                # Keep all texts instead of just samples
+                if text not in app_notifications[app_name]['full_texts']:
+                    app_notifications[app_name]['full_texts'].append(text)
             
             total_notifications += 1
         
@@ -1883,8 +1871,6 @@ def describe_applications_notifications_integrated(sensor_data, sensor_name, sta
             description_parts.append(f"    - Apps sending notifications: {len(app_notifications)}")
             
             # Show content statistics
-            if notifications_with_title > 0:
-                description_parts.append(f"    - Notifications with titles: {notifications_with_title}")
             if notifications_with_content > 0:
                 description_parts.append(f"    - Notifications with content: {notifications_with_content}")
             
@@ -1900,21 +1886,16 @@ def describe_applications_notifications_integrated(sensor_data, sensor_name, sta
                 else:
                     description_parts.append(f"         - {app_name}: {count} notification")
                 
-                # Show sample content if available
-                if app_data['sample_titles']:
-                    titles_str = ', '.join(f'"{title}"' for title in app_data['sample_titles'])
-                    description_parts.append(f"           Sample titles: {titles_str}")
-                
-                if app_data['sample_texts']:
-                    # Truncate long texts for readability
-                    sample_texts = []
-                    for text in app_data['sample_texts']:
-                        if len(text) > 50:
-                            sample_texts.append(f'"{text[:50]}..."')
-                        else:
-                            sample_texts.append(f'"{text}"')
-                    texts_str = ', '.join(sample_texts)
-                    description_parts.append(f"           Sample content: {texts_str}")
+                # Show all notification content if available
+                if app_data['full_texts']:
+                    # Show each text as separate JSON
+                    for i, text in enumerate(app_data['full_texts']):
+                        # Remove brackets if they're just wrapping the content
+                        clean_text = text.strip()
+                        if clean_text.startswith('[') and clean_text.endswith(']'):
+                            clean_text = clean_text[1:-1]
+                        text_json = json.dumps(clean_text, ensure_ascii=False)
+                        description_parts.append(f"           Text {i+1}: {text_json}")
             
             # Show timing patterns if multiple notifications
             if total_notifications > 1:
@@ -2767,11 +2748,9 @@ def describe_keyboard_integrated(sensor_data, sensor_name, start_timestamp, end_
                 
                 app_groups[app_name]['typing_sessions'].append(desc)
             
-            # Add detailed JSON section with preserved formatting
-            description_parts.append(f"    - Typing sessions (JSON):")
+            # Add detailed typing sessions with mixed format (JSON for text, human-readable for metrics)
+            description_parts.append(f"    - Typing sessions:")
             
-            # Create detailed JSON structure with simple indexes
-            detailed_sessions = {}
             typing_session_counter = 1
             
             for app_name, app_data in app_groups.items():
@@ -2781,46 +2760,49 @@ def describe_keyboard_integrated(sensor_data, sensor_name, start_timestamp, end_
                 typing_sessions.sort(key=lambda x: x['start_timestamp'])
                 
                 for desc in typing_sessions:
-                    session_key = f"typing_session_{typing_session_counter}"
+                    session_id = typing_session_counter
                     typing_session_counter += 1
                     
-                    period_data = {
-                        "app_name": app_name,
-                        "time": desc['datetime'].split(' ')[1],
-                        "duration_seconds": round(desc['duration_seconds'], 1),
-                        "full_text": desc['original_text'],  # Preserves original newlines
-                        "metrics": {
-                            "chars_per_minute": round(desc['chars_per_minute'], 1),
-                            "words_per_minute": round(desc['words_per_minute'], 1),
-                            "net_chars_per_minute": round(desc['net_chars_per_minute'], 1),
-                            "chars_deleted": desc['chars_deleted'],
-                            "words_deleted": desc['words_deleted'],
-                            "typo_count": desc['typo_count']
-                        },
-                        "typos": []
-                    }
+                    # Human-readable metrics
+                    time_str = desc['datetime'].split(' ')[1]
+                    duration_str = f"{round(desc['duration_seconds'], 1)} seconds"
+                    chars_per_min = f"{round(desc['chars_per_minute'], 1)} chars/min"
+                    words_per_min = f"{round(desc['words_per_minute'], 1)} words/min"
+                    net_chars_per_min = f"{round(desc['net_chars_per_minute'], 1)} net chars/min"
+                    chars_deleted = f"{desc['chars_deleted']} characters"
+                    words_deleted = f"{desc['words_deleted']} words"
+                    typo_count = f"{desc['typo_count']} typos"
                     
-                    # Uncomment to add screen session info (always include for consistency)
-                    # period_data["screen_session"] = desc['session_id']
+                    # Add session header with human-readable metrics
+                    description_parts.append(f"        - Typing Session: {session_id}")
+                    description_parts.append(f"            - App: {app_name}")
+                    description_parts.append(f"            - Time: {time_str}")
+                    description_parts.append(f"            - Duration: {duration_str}")
+                    description_parts.append(f"            - Typing speed: {chars_per_min}, {words_per_min}")
+                    description_parts.append(f"            - Net speed: {net_chars_per_min}")
+                    description_parts.append(f"            - Deletions: {chars_deleted} ({words_deleted})")
+                    description_parts.append(f"            - Typos detected: {typo_count}")
                     
-                    # Add detailed typo information with original formatting
-                    for pattern in desc['correction_patterns']:
-                        typo_data = {
-                            "type": pattern['type'],
-                            "deleted_text": pattern.get('deleted_text', ''),  # Preserves newlines
-                            "added_text": pattern.get('added_text', ''),      # Preserves newlines
-                            "chars_deleted": pattern['chars_deleted'],
-                            "chars_added": pattern['chars_added']
-                        }
-                        period_data["typos"].append(typo_data)
+                    # Add full text before typos section
+                    description_parts.append(f"            - Full Text: {json.dumps(desc['original_text'], ensure_ascii=False)}")
                     
-                    detailed_sessions[session_key] = period_data
-            
-            # Convert to JSON and add to description with proper indentation
-            json_str = json.dumps(detailed_sessions, indent=2, ensure_ascii=False)
-            # Add proper indentation for each line of JSON
-            indented_json = '\n'.join(['         ' + line for line in json_str.split('\n')])
-            description_parts.append(indented_json)
+                    # Add typo details in human-readable format if any
+                    if desc['correction_patterns']:
+                        description_parts.append(f"            - Typos:")
+                        for i, pattern in enumerate(desc['correction_patterns'], 1):
+                            description_parts.append(f"                - Typo {i}: {pattern['type'].replace('_', ' ')}")
+                            
+                            # Add deleted text in JSON format
+                            deleted_chars = pattern['chars_deleted']
+                            deleted_text = f"{deleted_chars} char{'s' if deleted_chars != 1 else ''} deleted"
+                            description_parts.append(f"                    - Deleted text: {json.dumps(pattern.get('deleted_text', ''), ensure_ascii=False)} ({deleted_text})")
+                            
+                            # Add added text in JSON format
+                            added_chars = pattern['chars_added']
+                            added_text = f"{added_chars} char{'s' if added_chars != 1 else ''} added"
+                            description_parts.append(f"                    - Added text: {json.dumps(pattern.get('added_text', ''), ensure_ascii=False)} ({added_text})")
+                    
+                    description_parts.append("")  # Add empty line for readability
             
             return '\n'.join(description_parts)
         
