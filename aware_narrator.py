@@ -10,6 +10,7 @@ from sklearn.cluster import DBSCAN
 from geopy.distance import geodesic
 import googlemaps
 from googlemaps import exceptions as gexceptions
+import re
 
 # Load configuration from yaml file
 CONFIG_FILE = "./config.yaml"
@@ -799,7 +800,7 @@ def describe_locations_integrated(all_points, cluster_labels, cluster, start_tim
     # Create a mapping from cluster ID to cluster data for faster lookup
     cluster_id_to_data = {}
     for cluster_data in cluster:
-        if len(cluster_data) >= 5:  # Has at least cluster_id, lat, lon, num_points, place
+        if len(cluster_data) == 6:  # Must have exactly 6 elements: cluster_id, lat, lon, num_points, place, distance_from_home
             cluster_id = cluster_data[0]
             cluster_id_to_data[cluster_id] = cluster_data
     
@@ -819,11 +820,8 @@ def describe_locations_integrated(all_points, cluster_labels, cluster, start_tim
             if place_now == "home":
                 distance_from_home = 0
             else:
-                # Get cluster distance - handle both old and new cluster data formats
-                if len(cluster_data) >= 6:  # Has distance information
-                    distance_from_home = cluster_data[5]  # cluster distance from home
-                else:
-                    distance_from_home = 0  # fallback
+                # Get cluster distance from home
+                distance_from_home = cluster_data[5]  # cluster distance from home
         else:
             # Handle case where cluster ID is not found (shouldn't happen but defensive programming)
             print(f"Warning: Cluster ID {label_now} not found in cluster data, using defaults")
@@ -3345,13 +3343,18 @@ def process_clustering_results(coordinates, cluster_labels, datetimes, indices, 
     
     for i, cluster_entry in enumerate(cluster):
         cluster_id, center_lat, center_lon, num_points, place = cluster_entry
-        distance_from_home = geodesic(home_group_center, (center_lat, center_lon)).meters
+        if place == "home":
+            # Manually assign 0 distance for home cluster
+            distance_from_home = 0.0
+        else:
+            # Calculate distance for non-home clusters
+            distance_from_home = geodesic(home_group_center, (center_lat, center_lon)).meters
         cluster[i] = cluster_entry + (distance_from_home,)  # Update the tuple in the cluster list
     
     # Validation: Show home cluster distance (should be 0 or very small)  
     for cluster_data in cluster:
-        if len(cluster_data) >= 6:  # Has distance information
-            cluster_id, center_lat, center_lon, num_points, place, cluster_distance_from_home = cluster_data[:6]
+        if len(cluster_data) == 6:  # Must have exactly 6 elements
+            cluster_id, center_lat, center_lon, num_points, place, cluster_distance_from_home = cluster_data
             if place == "home":
                 print(f"VALIDATION: Home cluster {cluster_id} distance from home: {cluster_distance_from_home:.1f}m (should be ~0 for merged center)")
                 break
@@ -3360,12 +3363,9 @@ def process_clustering_results(coordinates, cluster_labels, datetimes, indices, 
     if len(clustered_coordinates) > 0:
         print("Cluster Centers:")
         for cluster_data in cluster:
-            if len(cluster_data) >= 6:  # Has distance information
-                cluster_id, center_lat, center_lon, num_points, place, distance_from_home = cluster_data[:6]
+            if len(cluster_data) == 6:  # Must have exactly 6 elements
+                cluster_id, center_lat, center_lon, num_points, place, distance_from_home = cluster_data
                 print(f"Cluster {cluster_id}: Center Lat = {center_lat:.6f}, Center Lon = {center_lon:.6f}, N = {num_points}, Place = {place}, Distance = {distance_from_home:.1f}m")
-            else:  # Old format (fallback)
-                cluster_id, center_lat, center_lon, num_points, place = cluster_data
-                print(f"Cluster {cluster_id}: Center Lat = {center_lat:.6f}, Center Lon = {center_lon:.6f}, N = {num_points}, Place = {place}")
 
     return (cluster, clustered_coordinates, clustered_labels, clustered_datetimes, 
             clustered_indices, clustered_speeds, home_group_center)
@@ -5375,6 +5375,81 @@ def describe_installations_integrated(sensor_data, sensor_name, start_timestamp,
     print(f"Generated {len(narratives)} installations narratives (window size: {sensor_integration_time_window} minutes)")
     return narratives
 
+def split_description_by_days(description_file_path, daily_output_dir):
+    """
+    Split description file by days and save each day's content to separate files.
+    
+    Args:
+        description_file_path (str): Path to the input description file
+        daily_output_dir (str): Directory to save daily output files
+    
+    Returns:
+        dict: Dictionary mapping dates to their output file paths
+    """
+    import os
+    import re
+    from datetime import datetime
+    
+    # Create output directory if it doesn't exist
+    os.makedirs(daily_output_dir, exist_ok=True)
+    
+    # Read the entire description file
+    with open(description_file_path, 'r', encoding='utf-8') as f:
+        content = f.read()
+    
+    # Split content by windows - look for window headers
+    window_pattern = r'(Window \d+\nDay \d{4}-\d{2}-\d{2} \(.*?\)\n\d{2}:\d{2}:\d{2} - \d{2}:\d{2}:\d{2})'
+    windows = re.split(window_pattern, content)
+    
+    # Group windows by day
+    daily_windows = {}
+    current_day = None
+    current_content = ""
+    
+    for i, window in enumerate(windows):
+        if window.startswith('Window '):
+            # Extract date from the window header
+            date_match = re.search(r'Day (\d{4}-\d{2}-\d{2})', window)
+            if date_match:
+                day_date = date_match.group(1)
+                
+                # If we have content from a previous day, save it
+                if current_day and current_content.strip():
+                    if current_day not in daily_windows:
+                        daily_windows[current_day] = ""
+                    daily_windows[current_day] += current_content.strip() + "\n\n"
+                
+                # Start new day
+                current_day = day_date
+                current_content = window
+            else:
+                # If no date found, append to current content
+                current_content += window
+        else:
+            # This is the content between windows
+            current_content += window
+    
+    # Save the last day's content
+    if current_day and current_content.strip():
+        if current_day not in daily_windows:
+            daily_windows[current_day] = ""
+        daily_windows[current_day] += current_content.strip()
+    
+    # Write each day's content to a separate file
+    output_files = {}
+    for day_date, day_content in daily_windows.items():
+        # Create filename with date
+        filename = f"day_{day_date}.txt"
+        file_path = os.path.join(daily_output_dir, filename)
+        
+        # Write content to file
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(day_content)
+        
+        output_files[day_date] = file_path
+    
+    return output_files
+
 if __name__ == "__main__":
     print("Start narrating sensor data...")
     # Convert start and end times to timestamps
@@ -5503,38 +5578,41 @@ if __name__ == "__main__":
             ))
     
     if not points_with_indices:
-        print("No valid location points found!")
-        exit(1)
-    
-    # Extract data for clustering (only coordinates)
-    indices = [item[0] for item in points_with_indices]
-    coordinates = np.array([[item[1], item[2]] for item in points_with_indices])  # Only lat, lon
-    datetimes = [item[3] for item in points_with_indices]
-    speeds = [item[4] for item in points_with_indices]
-    
-    print(f"Data size is {len(coordinates)}")
-
-    # Initialize variables to ensure they exist even if clustering fails
-    cluster = []
-    cluster_labels = np.array([])
-    daily_clusters = {}  # Initialize daily_clusters dictionary
-    
-    # Determine if we should use daily clustering or all data
-    start_dt = datetime.strptime(START_TIME, '%Y-%m-%d %H:%M:%S')
-    end_dt = datetime.strptime(END_TIME, '%Y-%m-%d %H:%M:%S')
-    time_span_hours = (end_dt - start_dt).total_seconds() / 3600
-    
-    print(f"Time span: {time_span_hours:.1f} hours")
-    
-    if time_span_hours < 48:
-        print("Time span is less than 48 hours - using all location data for clustering")
-        use_daily_clustering = False
+        print("No valid location points found! Skipping location processing.")
+        # Initialize empty variables for location processing
+        indices = []
+        coordinates = np.array([])
+        datetimes = []
+        speeds = []
+        cluster = []
+        cluster_labels = np.array([])
+        daily_clusters = {}
     else:
-        print("Time span is 48 hours or more - using daily clustering based on night_time_end")
-        use_daily_clustering = True
+        # Extract data for clustering (only coordinates)
+        indices = [item[0] for item in points_with_indices]
+        coordinates = np.array([[item[1], item[2]] for item in points_with_indices])  # Only lat, lon
+        datetimes = [item[3] for item in points_with_indices]
+        speeds = [item[4] for item in points_with_indices]
     
-    # Perform DBSCAN clustering using haversine distance
-    print("Locations: Performing DBSCAN clustering")
+    # Only proceed with clustering if we have coordinates to process
+    if len(coordinates) > 0:
+        print(f"Data size is {len(coordinates)}")
+        # Determine if we should use daily clustering or all data
+        start_dt = datetime.strptime(START_TIME, '%Y-%m-%d %H:%M:%S')
+        end_dt = datetime.strptime(END_TIME, '%Y-%m-%d %H:%M:%S')
+        time_span_hours = (end_dt - start_dt).total_seconds() / 3600
+        
+        print(f"Time span: {time_span_hours:.1f} hours")
+        
+        if time_span_hours < 48:
+            print("Time span is less than 48 hours - using all location data for clustering")
+            use_daily_clustering = False
+        else:
+            print("Time span is 48 hours or more - using daily clustering based on night_time_end")
+            use_daily_clustering = True
+        
+        # Perform DBSCAN clustering using haversine distance
+        print("Locations: Performing DBSCAN clustering")
     """
     REFACTORED CLUSTERING ARCHITECTURE:
     
@@ -5592,6 +5670,10 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Unexpected error during clustering: {e}")
         print("Skipping location clustering due to error.")
+    
+    # Close the conditional block for location processing
+    else:
+        print("No location data available for clustering")
 
     # If a Google Maps API key is provided, perform reverse geocoding for all places
     if GOOGLE_MAP_KEY and cluster:
@@ -5600,12 +5682,12 @@ if __name__ == "__main__":
         reverse_geocode_results = []
         try:
             for idx, cluster_data in enumerate(cluster):
-                # Handle cluster data formats
-                if len(cluster_data) >= 6:  # Has distance information
-                    cluster_id, center_lat, center_lon, num_points, place, distance_from_home = cluster_data[:6]
-                else:  # Old format (fallback)
-                    cluster_id, center_lat, center_lon, num_points, place = cluster_data
-                    distance_from_home = 0
+                # Extract cluster data (must have exactly 6 elements)
+                if len(cluster_data) == 6:
+                    cluster_id, center_lat, center_lon, num_points, place, distance_from_home = cluster_data
+                else:
+                    print(f"Warning: Cluster data at index {idx} has {len(cluster_data)} elements, expected 6. Skipping.")
+                    continue
                 # Perform reverse geocoding for all places (both home and unknown)
                 reverse_geocode_data = None
                 try:
@@ -5621,40 +5703,35 @@ if __name__ == "__main__":
                     print(f"No valid address returned for ({center_lat}, {center_lon}).")
                     continue
 
-                if reverse_geocode_data:
-                    reverse_geocode_results.append(reverse_geocode_data)
-                    data = reverse_geocode_data.get("results")[0] # get the most relevant result
-                    formatted_address = data.get("formatted_address")
+                # Process the reverse geocoding data
+                reverse_geocode_results.append(reverse_geocode_data)
+                data = reverse_geocode_data.get("results")[0] # get the most relevant result
+                formatted_address = data.get("formatted_address", "")
 
-                    place_name = None
-                    place_type = None
+                # Extract place information from address components
+                place_type = ""
+                place_name = ""
+                for component in data.get("address_components", []):
+                    if isinstance(component, dict) and component.get("types"):
+                        types_list = component["types"]
+                        if types_list and len(types_list) > 0:
+                            place_type = types_list[0] or ""
+                        place_name = component.get('long_name', '')
+                        break
 
-                    # Search within address_components
-                    for component in data.get("address_components", []):
-                        if isinstance(component, dict) and component.get("types"):
-                            place_type = component["types"][0]
-                            place_name = f"{component.get('long_name', '')},"
-                            break
+                # Combine strings with proper spacing, filtering out empty strings
+                parts = [part for part in [place_type, place_name, formatted_address] if part.strip()]
+                geocoded_place = ", ".join(parts)
+                
+                # If this is the home cluster, keep "home" label and append geocoded result
+                if place == "home":
+                    updated_place = f"home, {geocoded_place}"
+                else:
+                    # For unknown places, replace with geocoded result
+                    updated_place = geocoded_place
 
-                    # Ensure place_type, place_name, and formatted_address are not None, use empty strings if they are
-                    place_type = place_type or ""
-                    place_name = place_name or ""
-                    formatted_address = formatted_address or ""
-
-                    geocoded_place = place_type + place_name + formatted_address
-                    
-                    # If this is the home cluster, keep "home" label and append geocoded result
-                    if place == "home":
-                        updated_place = f"home, {geocoded_place}"
-                    else:
-                        # For unknown places, replace with geocoded result
-                        updated_place = geocoded_place
-
-                    # Update cluster data while preserving distance information
-                    if len(cluster_data) >= 6:  # Has distance information
-                        cluster[idx] = (cluster_id, center_lat, center_lon, num_points, updated_place, distance_from_home)
-                    else:  # Old format (fallback)
-                        cluster[idx] = (cluster_id, center_lat, center_lon, num_points, updated_place)
+                # Update cluster data while preserving distance information
+                cluster[idx] = (cluster_id, center_lat, center_lon, num_points, updated_place, distance_from_home)
         except Exception as e:
             print(f"Error in Google Maps API request: {e}")
         #save reverse geocoding results to a jsonl file with prefix to participant id
@@ -5671,12 +5748,9 @@ if __name__ == "__main__":
     if len(coordinates) > 0 and cluster:
         print("Cluster Centers (Updated):")
         for cluster_data in cluster:
-            if len(cluster_data) >= 6:  # Has distance information
-                cluster_id, center_lat, center_lon, num_points, place, distance_from_home = cluster_data[:6]
+            if len(cluster_data) == 6:  # Must have exactly 6 elements
+                cluster_id, center_lat, center_lon, num_points, place, distance_from_home = cluster_data
                 print(f"Cluster {cluster_id}: Center Lat = {center_lat:.6f}, Center Lon = {center_lon:.6f}, N = {num_points}, Place = {place}, Distance = {distance_from_home:.1f}m")
-            else:  # Old format (fallback)
-                cluster_id, center_lat, center_lon, num_points, place = cluster_data
-                print(f"Cluster {cluster_id}: Center Lat = {center_lat:.6f}, Center Lon = {center_lon:.6f}, N = {num_points}, Place = {place}")
 
 
     # Generate descriptions for locations based on clustering results
@@ -5729,3 +5803,7 @@ if __name__ == "__main__":
     with open(output_file, 'w') as file:
         file.write(text)
         
+    # Split description by days and save each day's content to separate files
+    daily_output_dir = os.path.join(os.path.dirname(output_file), "daily_output")
+    output_files = split_description_by_days(output_file, daily_output_dir)
+    print(f"Split description into {len(output_files)} daily files in {daily_output_dir}")

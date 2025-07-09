@@ -1,4 +1,3 @@
-config.yaml
 input
 output
 exported_json
@@ -7,3 +6,8 @@ filtered_jsonl
 data_import.py
 daily_description*
 participant_device_ids.json
+__pycache__/
+resources/
+daily_description
+description
+participant_data
