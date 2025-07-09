@@ -2,6 +2,9 @@
 - Updated sensor_narrator.py
     - Location: clean up redundant code; allows skip when no location data avaliable.
     - Implemented daily splitation
+    - Support mulitple participants
+    - Make sure using utf-8 when reading and writing to handle emojis
+- Updated config.yaml to replace P_ID by P_IDs
 
 2025-07-07
 - Added aware_narrator.py, extract_sessions.py, split_description, json2jsonl.py, map_pid_deviceid.py

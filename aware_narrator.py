@@ -14,7 +14,7 @@ import re
 
 # Load configuration from yaml file
 CONFIG_FILE = "./config.yaml"
-with open(CONFIG_FILE, "r") as file:
+with open(CONFIG_FILE, "r", encoding='utf-8') as file:
     CONFIG = yaml.safe_load(file)
 
 # Assign variables from yaml
@@ -55,39 +55,377 @@ def load_device_ids_from_csv(csv_file_path, participant_id):
         print(f"Error reading CSV file {csv_file_path}: {e}")
         return []
     
-P_ID = CONFIG["P_ID"]
+# Get participant IDs from config
+P_IDs = CONFIG["P_IDs"]
 
-DEVICE_IDs = load_device_ids_from_csv(pid_to_deviceid_map, P_ID)
+# Global configuration variables
 START_TIME = CONFIG["START_TIME"]
 END_TIME = CONFIG["END_TIME"]
 timezone = pytz.timezone(CONFIG["timezone"])
-input_directory = CONFIG["input_directory"].format(P_ID=P_ID)
 sensor_integration_time_window = CONFIG["sensor_integration_time_window"]
 gate_time_window = CONFIG["gate_time_window"]
 sensors = CONFIG["sensors"]
 GOOGLE_MAP_KEY = CONFIG["GOOGLE_MAP_KEY"]
 eps = CONFIG["eps"]
 min_samples = CONFIG["min_samples"]
-output_file = CONFIG["output_file"].format(P_ID=P_ID)
-daily_output_dir = CONFIG["daily_output_dir"].format(P_ID=P_ID)
 DISCARD_SYSTEM_UI = CONFIG["DISCARD_SYSTEM_UI"]
 night_time_start = CONFIG["night_time_start"]
 night_time_end = CONFIG["night_time_end"]
 
-# Ensure output directories exist
-os.makedirs(daily_output_dir, exist_ok=True)
-os.makedirs(os.path.dirname(output_file), exist_ok=True)
-
-jsonl_files = [(f"{sensor}.jsonl", sensor) for sensor in sensors]
-
 blacklist_apps = CONFIG["blacklist_apps"]
 whitelist_system_apps = CONFIG["whitelist_system_apps"]
 
+# Global variables for app processing
 application_name_list = {}
-sensor_narratives = {}
-prev_battery_status = None
-prev_keyboard = None
-prev_sensor_wifi = None
+
+def process_participant(P_ID):
+    """
+    Process sensor data for a single participant.
+    
+    Args:
+        P_ID (str): Participant ID to process
+        
+    Returns:
+        bool: True if processing was successful, False otherwise
+    """
+    print(f"\n{'='*60}")
+    print(f"Processing participant: {P_ID}")
+    print(f"{'='*60}")
+    
+    # Load device IDs for this participant
+    DEVICE_IDs = load_device_ids_from_csv(pid_to_deviceid_map, P_ID)
+    if not DEVICE_IDs:
+        print(f"Warning: No device IDs found for participant {P_ID}. Skipping.")
+        return False
+    
+    # Set up participant-specific paths
+    input_directory = CONFIG["input_directory"].format(P_ID=P_ID)
+    output_file = CONFIG["output_file"].format(P_ID=P_ID)
+    daily_output_dir = CONFIG["daily_output_dir"].format(P_ID=P_ID)
+    
+    # Ensure output directories exist
+    os.makedirs(daily_output_dir, exist_ok=True)
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+    
+    jsonl_files = [(f"{sensor}.jsonl", sensor) for sensor in sensors]
+    
+    # Initialize participant-specific variables
+    sensor_narratives = {}
+    prev_battery_status = None
+    prev_keyboard = None
+    prev_sensor_wifi = None
+    
+    # Convert start and end times to timestamps
+    START_TIMESTAMP = convert_timestring_to_timestamp(START_TIME, CONFIG["timezone"])
+    END_TIMESTAMP = convert_timestring_to_timestamp(END_TIME, CONFIG["timezone"])
+
+    # Load session data for accurate active time calculation
+    session_file_path = CONFIG.get("session_data_file", "").format(P_ID=P_ID)
+    sessions = load_session_data(session_file_path)
+    
+    # If config session file not found, try the default location
+    if not sessions:
+        default_session_file = f"step1_data/{P_ID}/sessions.jsonl"
+        print(f"Trying default session file location: {default_session_file}")
+        sessions = load_session_data(default_session_file)
+    
+    print(f"Loaded {len(sessions)} session records")
+
+    # categorical key values to be converted to integers
+    key_list = ["battery_status", "battery_level", "call_type","call_duration", "installation_status", "message_type", "screen_status"]
+
+    print("Keep data within time range: ", START_TIME, "to", END_TIME)
+    
+    #store location data in a list
+    location_data = []
+    
+    # Store WiFi sensor data separately for combined processing
+    wifi_sensor_data = {}
+
+    for jsonl_file, sensor_name in jsonl_files:      
+        sensor_data = get_sensor_data(sensor_name, START_TIMESTAMP, END_TIMESTAMP, input_directory)
+        #If sensor_data is not found, skip the sensor
+        if not sensor_data:
+            continue
+
+        # Convert to DataFrame for timestamp processing, then back to list of dictionaries
+        df = pd.DataFrame(sensor_data)
+        df = convert_timestamp_column(df, CONFIG["timezone"])
+        sensor_data = df.to_dict('records')
+
+        if sensor_name == "locations":
+            location_data = sensor_data
+            continue
+        
+        # Handle WiFi and network sensors specially for combined processing
+        if sensor_name in ["wifi", "sensor_wifi", "network"]:
+            wifi_sensor_data[sensor_name] = sensor_data
+            print(f"Collected {sensor_name} data: {len(sensor_data)} records")
+            continue
+        
+        # Initialize sensor-specific narrative list
+        if sensor_name not in sensor_narratives:
+            sensor_narratives[sensor_name] = []
+
+        # Generate integrated descriptions for each sensor
+        narratives = generate_integrated_description(sensor_data, sensor_name, START_TIMESTAMP, END_TIMESTAMP, sessions)
+        if narratives:
+            # If it's a list of narratives (like from applications_foreground), extend the list
+            if isinstance(narratives, list):
+                sensor_narratives[sensor_name].extend(narratives)
+            else:
+                # For backward compatibility with single description sensors
+                sensor_narratives[sensor_name].append((sensor_name, narratives))
+
+    # Process WiFi sensors together if we have any type
+    if wifi_sensor_data:
+        sensor_wifi_data = wifi_sensor_data.get("sensor_wifi", [])
+        wifi_data = wifi_sensor_data.get("wifi", [])
+        
+        print(f"Processing combined WiFi analysis:")
+        print(f"  - sensor_wifi: {len(sensor_wifi_data)} records")
+        print(f"  - wifi: {len(wifi_data)} records")
+        
+        # Generate combined WiFi narratives
+        combined_wifi_narratives = generate_wifi_combined_description(
+            sensor_wifi_data, wifi_data, START_TIMESTAMP, END_TIMESTAMP, sessions
+        )
+        
+        if combined_wifi_narratives:
+            # Store combined WiFi narratives under a unified key
+            sensor_narratives["wifi_combined"] = combined_wifi_narratives
+            print(f"Generated {len(combined_wifi_narratives)} combined WiFi narratives")
+
+    #summary len of each sensor narrative list
+    for sensor_name, narrative_list in sensor_narratives.items():
+        print(f"Sensor: {sensor_name}, Number of integrated descriptions: {len(narrative_list)}")
+
+    # Generate distance matrix from location_data
+    print("Locations: Generate distance matrix...")
+    
+    # Build points with original indices to maintain alignment
+    points_with_indices = []
+    for idx, record in enumerate(location_data):
+        # Check if required keys exist in the dictionary
+        if "double_latitude" in record and "double_longitude" in record and "double_speed" in record:
+            points_with_indices.append((
+                idx,  # Original index in location_data
+                float(record["double_latitude"]), # Latitude
+                float(record["double_longitude"]), # Longitude
+                record["datetime"], # Parsed datetime object
+                float(record["double_speed"]) # Speed
+            ))
+    
+    if not points_with_indices:
+        print("No valid location points found! Skipping location processing.")
+        # Initialize empty variables for location processing
+        indices = []
+        coordinates = np.array([])
+        datetimes = []
+        speeds = []
+        cluster = []
+        cluster_labels = np.array([])
+        daily_clusters = {}
+    else:
+        # Extract data for clustering (only coordinates)
+        indices = [item[0] for item in points_with_indices]
+        coordinates = np.array([[item[1], item[2]] for item in points_with_indices])  # Only lat, lon
+        datetimes = [item[3] for item in points_with_indices]
+        speeds = [item[4] for item in points_with_indices]
+    
+    # Only proceed with clustering if we have coordinates to process
+    if len(coordinates) > 0:
+        print(f"Data size is {len(coordinates)}")
+        # Determine if we should use daily clustering or all data
+        start_dt = datetime.strptime(START_TIME, '%Y-%m-%d %H:%M:%S')
+        end_dt = datetime.strptime(END_TIME, '%Y-%m-%d %H:%M:%S')
+        time_span_hours = (end_dt - start_dt).total_seconds() / 3600
+        
+        print(f"Time span: {time_span_hours:.1f} hours")
+        
+        if time_span_hours < 48:
+            print("Time span is less than 48 hours - using all location data for clustering")
+            use_daily_clustering = False
+        else:
+            print("Time span is 48 hours or more - using daily clustering based on night_time_end")
+            use_daily_clustering = True
+        
+        # Perform DBSCAN clustering using haversine distance
+        print("Locations: Performing DBSCAN clustering")
+        
+        try:
+            if len(coordinates) > 0: # Ensure there are points to process
+                # Perform DBSCAN clustering using shared function
+                cluster_labels, daily_clusters = perform_dbscan_clustering(
+                    coordinates, datetimes, eps, min_samples, use_daily_clustering, 
+                    start_dt, end_dt, night_time_end
+                )
+                
+                n_clusters = len(set(cluster_labels)) - (1 if -1 in cluster_labels else 0)  # Exclude noise
+                print(f"DBSCAN found {n_clusters} clusters (excluding noise)")
+                print(f"Noise points: {list(cluster_labels).count(-1)} out of {len(cluster_labels)}")
+                
+                # Process clustering results using shared function
+                (cluster, clustered_coordinates, clustered_labels, clustered_datetimes, 
+                 clustered_indices, clustered_speeds, home_group_center) = process_clustering_results(
+                    coordinates, cluster_labels, datetimes, indices, speeds,
+                    use_daily_clustering, daily_clusters, night_time_start, night_time_end
+                )
+                
+                # Update variables to use clustered data for the rest of the algorithm
+                coordinates = clustered_coordinates
+                cluster_labels = clustered_labels
+                datetimes = clustered_datetimes
+                indices = clustered_indices
+                speeds = clustered_speeds
+
+        except NameError as e:
+            print(f"Error: Variable not initialized - {e}")
+            print("Skipping location clustering due to error.")
+        except ValueError as e:
+            print(f"Error: {e}")
+            print("Skipping location clustering due to error.")
+        except Exception as e:
+            print(f"Unexpected error during clustering: {e}")
+            print("Skipping location clustering due to error.")
+        
+        # Close the conditional block for location processing
+        else:
+            print("No location data available for clustering")
+
+    # If a Google Maps API key is provided, perform reverse geocoding for all places
+    if GOOGLE_MAP_KEY and cluster:
+        gmaps = googlemaps.Client(key=GOOGLE_MAP_KEY)
+        # a list to store all reverse geocoding results
+        reverse_geocode_results = []
+        try:
+            for idx, cluster_data in enumerate(cluster):
+                # Extract cluster data (must have exactly 6 elements)
+                if len(cluster_data) == 6:
+                    cluster_id, center_lat, center_lon, num_points, place, distance_from_home = cluster_data
+                else:
+                    print(f"Warning: Cluster data at index {idx} has {len(cluster_data)} elements, expected 6. Skipping.")
+                    continue
+                # Perform reverse geocoding for all places (both home and unknown)
+                reverse_geocode_data = None
+                try:
+                    reverse_geocode_data = gmaps.reverse_geocode((center_lat, center_lon), enable_address_descriptor=True)
+                except (gexceptions.ApiError, gexceptions.HTTPError, gexceptions.Timeout, gexceptions.TransportError) as e:
+                    print(f"Error during reverse geocoding for ({center_lat}, {center_lon}): {e}")
+                    continue
+                except Exception as e:
+                    print(f"Unexpected error during reverse geocoding for ({center_lat}, {center_lon}): {e}")
+                    continue
+
+                if not reverse_geocode_data or reverse_geocode_data.get("status") != "OK":
+                    print(f"No valid address returned for ({center_lat}, {center_lon}).")
+                    continue
+
+                # Process the reverse geocoding data
+                reverse_geocode_results.append(reverse_geocode_data)
+                data = reverse_geocode_data.get("results")[0] # get the most relevant result
+                formatted_address = data.get("formatted_address", "")
+
+                # Extract place information from address components
+                place_type = ""
+                place_name = ""
+                for component in data.get("address_components", []):
+                    if isinstance(component, dict) and component.get("types"):
+                        types_list = component["types"]
+                        if types_list and len(types_list) > 0:
+                            place_type = types_list[0] or ""
+                        place_name = component.get('long_name', '')
+                        break
+
+                # Combine strings with proper spacing, filtering out empty strings
+                parts = [part for part in [place_type, place_name, formatted_address] if part.strip()]
+                geocoded_place = ", ".join(parts)
+                
+                # If this is the home cluster, keep "home" label and append geocoded result
+                if place == "home":
+                    updated_place = f"home, {geocoded_place}"
+                else:
+                    # For unknown places, replace with geocoded result
+                    updated_place = geocoded_place
+
+                # Update cluster data while preserving distance information
+                cluster[idx] = (cluster_id, center_lat, center_lon, num_points, updated_place, distance_from_home)
+        except Exception as e:
+            print(f"Error in Google Maps API request: {e}")
+        #save reverse geocoding results to a jsonl file with prefix to participant id
+
+        # Parse the full END_TIME
+        end_date = datetime.strptime(END_TIME, '%Y-%m-%d %H:%M:%S').strftime('%Y%m%d%H%M%S')
+        filename = f"{P_ID}_{end_date}_reverse_geocode_results.jsonl"
+        
+        with open(filename, "w", encoding='utf-8') as file:
+            for result in reverse_geocode_results:
+                file.write(json.dumps(result) + "\n")
+
+    # Display the updated cluster information
+    if len(coordinates) > 0 and cluster:
+        print("Cluster Centers (Updated):")
+        for cluster_data in cluster:
+            if len(cluster_data) == 6:  # Must have exactly 6 elements
+                cluster_id, center_lat, center_lon, num_points, place, distance_from_home = cluster_data
+                print(f"Cluster {cluster_id}: Center Lat = {center_lat:.6f}, Center Lon = {center_lon:.6f}, N = {num_points}, Place = {place}, Distance = {distance_from_home:.1f}m")
+
+    # Generate descriptions for locations based on clustering results
+    # Reconstruct points data for describe_locations_integrated function
+    # Create all_points structure: [latitude, longitude, datetime_string, speed]
+    if len(coordinates) > 0 and len(cluster_labels) > 0 and cluster:
+        # Reconstruct all_points with the correct structure for describe_locations_integrated
+        reconstructed_points = []
+        for i in range(len(coordinates)):
+            lat, lon = coordinates[i]
+            dt_str = datetimes[i] if isinstance(datetimes[i], str) else str(datetimes[i])
+            speed = speeds[i]
+            reconstructed_points.append([lat, lon, dt_str, speed])
+        
+        reconstructed_points = np.array(reconstructed_points, dtype=object)
+        
+        # Initialize locations narrative list
+        if "locations" not in sensor_narratives:
+            sensor_narratives["locations"] = []
+        
+        # Generate integrated location descriptions
+        location_narratives = describe_locations_integrated(
+            reconstructed_points, cluster_labels, cluster, 
+            START_TIMESTAMP, END_TIMESTAMP, sessions
+        )
+        
+        if location_narratives:
+            sensor_narratives["locations"].extend(location_narratives)
+
+    all_narratives = []
+    
+    #load all narrative lists
+    for sensor_name, sensor_narrative_list in sensor_narratives.items():
+        for item in sensor_narrative_list:
+            all_narratives.append(item)
+
+    # Write output description to a text file
+    print("Output description into text file...")
+    # Remove duplicates first, then sort by time window and sensor order
+    unique_narratives = list(set(all_narratives))
+    all_narratives = sort_narratives_by_time_window_and_sensor_order(unique_narratives)
+    text = "\n".join([str(item[1]) for item in all_narratives])
+
+    # Remove system UI entries if required
+    if DISCARD_SYSTEM_UI:
+        cleaned_narrative_list = [x for x in all_narratives if "System UI" not in x[1]]
+        text = "\n".join([str(item[1]) for item in cleaned_narrative_list])
+        
+    # Save to file
+    with open(output_file, 'w', encoding='utf-8') as file:
+        file.write(text)
+        
+    # Split description by days and save each day's content to separate files
+    output_files = split_description_by_days(output_file, daily_output_dir)
+    print(f"Split description into {len(output_files)} daily files in {daily_output_dir}")
+    
+    print(f"Completed processing for participant {P_ID}")
+    return True
 
 def convert_timestring_to_timestamp(timestring, timezone_str="Australia/Melbourne"):
     """
@@ -142,7 +480,7 @@ def convert_timestamp_column(df, timezone_str="Australia/Melbourne"):
     
     return df
 
-def get_sensor_data(sensor_name, start_timestamp, end_timestamp):
+def get_sensor_data(sensor_name, start_timestamp, end_timestamp, input_dir):
     """
     Load sensor data from JSONL file and filter by timestamp range.
     
@@ -150,12 +488,13 @@ def get_sensor_data(sensor_name, start_timestamp, end_timestamp):
         sensor_name (str): Name of the sensor (e.g., 'battery', 'applications_foreground')
         start_timestamp (float): Start timestamp in milliseconds
         end_timestamp (float): End timestamp in milliseconds
+        input_dir (str): Input directory path
     
     Returns:
         list: List of sensor records within the timestamp range
     """
     # Construct the file path
-    file_path = os.path.join(input_directory, f"{sensor_name}.jsonl")
+    file_path = os.path.join(input_dir, f"{sensor_name}.jsonl")
     
     # Check if file exists
     if not os.path.exists(file_path):
@@ -165,7 +504,7 @@ def get_sensor_data(sensor_name, start_timestamp, end_timestamp):
     filtered_records = []
     
     try:
-        with open(file_path, 'r') as file:
+        with open(file_path, 'r', encoding='utf-8') as file:
             for line in file:
                 line = line.strip()
                 if not line:  # Skip empty lines
@@ -1685,7 +2024,7 @@ def load_session_data(session_file_path):
     """
     sessions = []
     try:
-        with open(session_file_path, 'r') as f:
+        with open(session_file_path, 'r', encoding='utf-8') as f:
             for line in f:
                 if line.strip():
                     sessions.append(json.loads(line.strip()))
@@ -5451,28 +5790,14 @@ def split_description_by_days(description_file_path, daily_output_dir):
     return output_files
 
 if __name__ == "__main__":
-    print("Start narrating sensor data...")
-    # Convert start and end times to timestamps
-    START_TIMESTAMP = convert_timestring_to_timestamp(START_TIME, CONFIG["timezone"])
-    END_TIMESTAMP = convert_timestring_to_timestamp(END_TIME, CONFIG["timezone"])
-
-    # Load session data for accurate active time calculation
-    session_file_path = CONFIG.get("session_data_file", "").format(P_ID=P_ID)
-    sessions = load_session_data(session_file_path)
+    print("Start narrating sensor data for multiple participants...")
     
-    # If config session file not found, try the default location
-    if not sessions:
-        default_session_file = f"step1_data/{P_ID}/sessions.jsonl"
-        print(f"Trying default session file location: {default_session_file}")
-        sessions = load_session_data(default_session_file)
-    
-    print(f"Loaded {len(sessions)} session records")
-
-    #load app_package_pairs.jsonl from resources folder for future package name to application name mapping
+    # Load app_package_pairs.jsonl from resources folder for future package name to application name mapping
+    # This is loaded once and shared across all participants
     app_package_file_path = os.path.join("resources", "app_package_pairs.jsonl")
     
     try:
-        with open(app_package_file_path, 'r') as file:
+        with open(app_package_file_path, 'r', encoding='utf-8') as file:
             for line in file:
                 line = line.strip()
                 if line:  # Skip empty lines
@@ -5481,6 +5806,7 @@ if __name__ == "__main__":
                     application_name = app_data.get("application_name")
                     if package_name and application_name:
                         application_name_list[package_name] = application_name
+        print(f"Loaded {len(application_name_list)} app package mappings")
     except FileNotFoundError:
         print(f"Warning: App package pairs file {app_package_file_path} not found")
         application_name_list = {}
@@ -5488,322 +5814,32 @@ if __name__ == "__main__":
         print(f"Error reading app package pairs file: {e}")
         application_name_list = {}
     
-    # Now package name get be used as key to get application name
-    # E.g., application_name_list[package_name] = application_name
-
-
-    # categorical key values to be converted to integers
-    key_list = ["battery_status", "battery_level", "call_type","call_duration", "installation_status", "message_type", "screen_status"]
-
-    print("Keep data within time range: ", START_TIME, "to", END_TIME)
+    # Process each participant
+    successful_participants = []
+    failed_participants = []
     
-    #store location data in a list
-    location_data = []
-    
-    # Store WiFi sensor data separately for combined processing
-    wifi_sensor_data = {}
-
-    for jsonl_file, sensor_name in jsonl_files:      
-        sensor_data = get_sensor_data(sensor_name, START_TIMESTAMP, END_TIMESTAMP)
-        #If sensor_data is not found, skip the sensor
-        if not sensor_data:
-            continue
-
-        # Convert to DataFrame for timestamp processing, then back to list of dictionaries
-        df = pd.DataFrame(sensor_data)
-        df = convert_timestamp_column(df, CONFIG["timezone"])
-        sensor_data = df.to_dict('records')
-
-        if sensor_name == "locations":
-            location_data = sensor_data
-            continue
-        
-        # Handle WiFi and network sensors specially for combined processing
-        if sensor_name in ["wifi", "sensor_wifi", "network"]:
-            wifi_sensor_data[sensor_name] = sensor_data
-            print(f"Collected {sensor_name} data: {len(sensor_data)} records")
-            continue
-        
-        # Initialize sensor-specific narrative list
-        if sensor_name not in sensor_narratives:
-            sensor_narratives[sensor_name] = []
-
-        # Generate integrated descriptions for each sensor
-        narratives = generate_integrated_description(sensor_data, sensor_name, START_TIMESTAMP, END_TIMESTAMP, sessions)
-        if narratives:
-            # If it's a list of narratives (like from applications_foreground), extend the list
-            if isinstance(narratives, list):
-                sensor_narratives[sensor_name].extend(narratives)
-            else:
-                # For backward compatibility with single description sensors
-                sensor_narratives[sensor_name].append((sensor_name, narratives))
-
-    # Process WiFi sensors together if we have any type
-    if wifi_sensor_data:
-        sensor_wifi_data = wifi_sensor_data.get("sensor_wifi", [])
-        wifi_data = wifi_sensor_data.get("wifi", [])
-        
-        print(f"Processing combined WiFi analysis:")
-        print(f"  - sensor_wifi: {len(sensor_wifi_data)} records")
-        print(f"  - wifi: {len(wifi_data)} records")
-        
-        # Generate combined WiFi narratives
-        combined_wifi_narratives = generate_wifi_combined_description(
-            sensor_wifi_data, wifi_data, START_TIMESTAMP, END_TIMESTAMP, sessions
-        )
-        
-        if combined_wifi_narratives:
-            # Store combined WiFi narratives under a unified key
-            sensor_narratives["wifi_combined"] = combined_wifi_narratives
-            print(f"Generated {len(combined_wifi_narratives)} combined WiFi narratives")
-
-    #summary len of each sensor narrative list
-    for sensor_name, narrative_list in sensor_narratives.items():
-        print(f"Sensor: {sensor_name}, Number of integrated descriptions: {len(narrative_list)}")
-
-    # Generate distance matrix from location_data
-    print("Locations: Generate distance matrix...")
-    
-    # Build points with original indices to maintain alignment
-    points_with_indices = []
-    for idx, record in enumerate(location_data):
-        # Check if required keys exist in the dictionary
-        if "double_latitude" in record and "double_longitude" in record and "double_speed" in record:
-            points_with_indices.append((
-                idx,  # Original index in location_data
-                float(record["double_latitude"]), # Latitude
-                float(record["double_longitude"]), # Longitude
-                record["datetime"], # Parsed datetime object
-                float(record["double_speed"]) # Speed
-            ))
-    
-    if not points_with_indices:
-        print("No valid location points found! Skipping location processing.")
-        # Initialize empty variables for location processing
-        indices = []
-        coordinates = np.array([])
-        datetimes = []
-        speeds = []
-        cluster = []
-        cluster_labels = np.array([])
-        daily_clusters = {}
-    else:
-        # Extract data for clustering (only coordinates)
-        indices = [item[0] for item in points_with_indices]
-        coordinates = np.array([[item[1], item[2]] for item in points_with_indices])  # Only lat, lon
-        datetimes = [item[3] for item in points_with_indices]
-        speeds = [item[4] for item in points_with_indices]
-    
-    # Only proceed with clustering if we have coordinates to process
-    if len(coordinates) > 0:
-        print(f"Data size is {len(coordinates)}")
-        # Determine if we should use daily clustering or all data
-        start_dt = datetime.strptime(START_TIME, '%Y-%m-%d %H:%M:%S')
-        end_dt = datetime.strptime(END_TIME, '%Y-%m-%d %H:%M:%S')
-        time_span_hours = (end_dt - start_dt).total_seconds() / 3600
-        
-        print(f"Time span: {time_span_hours:.1f} hours")
-        
-        if time_span_hours < 48:
-            print("Time span is less than 48 hours - using all location data for clustering")
-            use_daily_clustering = False
-        else:
-            print("Time span is 48 hours or more - using daily clustering based on night_time_end")
-            use_daily_clustering = True
-        
-        # Perform DBSCAN clustering using haversine distance
-        print("Locations: Performing DBSCAN clustering")
-    """
-    REFACTORED CLUSTERING ARCHITECTURE:
-    
-    The clustering process has been refactored into two shared functions to eliminate
-    code duplication between single-day and multi-day clustering approaches:
-    
-    1. perform_dbscan_clustering(): Handles the actual DBSCAN clustering logic
-       - Single-day: Clusters all data at once using haversine distance
-       - Multi-day: Groups data by daily periods, clusters each day separately
-       
-    2. process_clustering_results(): Handles post-clustering analysis  
-       - Filters out noise points (-1 labels)
-       - Identifies home cluster (simple vs daily candidate merging)
-       - Builds cluster data structure with distances
-       - Calculates distances from home for all clusters
-       
-    Benefits:
-    - Eliminates ~200 lines of duplicated code
-    - Makes the main clustering logic more readable
-    - Easier to maintain and debug
-    - Single source of truth for clustering algorithms
-    """
-    try:
-        if len(coordinates) > 0: # Ensure there are points to process
-            # Perform DBSCAN clustering using shared function
-            cluster_labels, daily_clusters = perform_dbscan_clustering(
-                coordinates, datetimes, eps, min_samples, use_daily_clustering, 
-                start_dt, end_dt, night_time_end
-            )
-            
-            n_clusters = len(set(cluster_labels)) - (1 if -1 in cluster_labels else 0)  # Exclude noise
-            print(f"DBSCAN found {n_clusters} clusters (excluding noise)")
-            print(f"Noise points: {list(cluster_labels).count(-1)} out of {len(cluster_labels)}")
-            
-            # Process clustering results using shared function
-            (cluster, clustered_coordinates, clustered_labels, clustered_datetimes, 
-             clustered_indices, clustered_speeds, home_group_center) = process_clustering_results(
-                coordinates, cluster_labels, datetimes, indices, speeds,
-                use_daily_clustering, daily_clusters, night_time_start, night_time_end
-            )
-            
-            # Update variables to use clustered data for the rest of the algorithm
-            coordinates = clustered_coordinates
-            cluster_labels = clustered_labels
-            datetimes = clustered_datetimes
-            indices = clustered_indices
-            speeds = clustered_speeds
-
-    except NameError as e:
-        print(f"Error: Variable not initialized - {e}")
-        print("Skipping location clustering due to error.")
-    except ValueError as e:
-        print(f"Error: {e}")
-        print("Skipping location clustering due to error.")
-    except Exception as e:
-        print(f"Unexpected error during clustering: {e}")
-        print("Skipping location clustering due to error.")
-    
-    # Close the conditional block for location processing
-    else:
-        print("No location data available for clustering")
-
-    # If a Google Maps API key is provided, perform reverse geocoding for all places
-    if GOOGLE_MAP_KEY and cluster:
-        gmaps = googlemaps.Client(key=GOOGLE_MAP_KEY)
-        # a list to store all reverse geocoding results
-        reverse_geocode_results = []
+    for P_ID in P_IDs:
         try:
-            for idx, cluster_data in enumerate(cluster):
-                # Extract cluster data (must have exactly 6 elements)
-                if len(cluster_data) == 6:
-                    cluster_id, center_lat, center_lon, num_points, place, distance_from_home = cluster_data
-                else:
-                    print(f"Warning: Cluster data at index {idx} has {len(cluster_data)} elements, expected 6. Skipping.")
-                    continue
-                # Perform reverse geocoding for all places (both home and unknown)
-                reverse_geocode_data = None
-                try:
-                    reverse_geocode_data = gmaps.reverse_geocode((center_lat, center_lon), enable_address_descriptor=True)
-                except (gexceptions.ApiError, gexceptions.HTTPError, gexceptions.Timeout, gexceptions.TransportError) as e:
-                    print(f"Error during reverse geocoding for ({center_lat}, {center_lon}): {e}")
-                    continue
-                except Exception as e:
-                    print(f"Unexpected error during reverse geocoding for ({center_lat}, {center_lon}): {e}")
-                    continue
-
-                if not reverse_geocode_data or reverse_geocode_data.get("status") != "OK":
-                    print(f"No valid address returned for ({center_lat}, {center_lon}).")
-                    continue
-
-                # Process the reverse geocoding data
-                reverse_geocode_results.append(reverse_geocode_data)
-                data = reverse_geocode_data.get("results")[0] # get the most relevant result
-                formatted_address = data.get("formatted_address", "")
-
-                # Extract place information from address components
-                place_type = ""
-                place_name = ""
-                for component in data.get("address_components", []):
-                    if isinstance(component, dict) and component.get("types"):
-                        types_list = component["types"]
-                        if types_list and len(types_list) > 0:
-                            place_type = types_list[0] or ""
-                        place_name = component.get('long_name', '')
-                        break
-
-                # Combine strings with proper spacing, filtering out empty strings
-                parts = [part for part in [place_type, place_name, formatted_address] if part.strip()]
-                geocoded_place = ", ".join(parts)
-                
-                # If this is the home cluster, keep "home" label and append geocoded result
-                if place == "home":
-                    updated_place = f"home, {geocoded_place}"
-                else:
-                    # For unknown places, replace with geocoded result
-                    updated_place = geocoded_place
-
-                # Update cluster data while preserving distance information
-                cluster[idx] = (cluster_id, center_lat, center_lon, num_points, updated_place, distance_from_home)
+            success = process_participant(P_ID)
+            if success:
+                successful_participants.append(P_ID)
+            else:
+                failed_participants.append(P_ID)
         except Exception as e:
-            print(f"Error in Google Maps API request: {e}")
-        #save reverse geocoding results to a jsonl file with prefix to participant id
-
-        # Parse the full END_TIME
-        end_date = datetime.strptime(END_TIME, '%Y-%m-%d %H:%M:%S').strftime('%Y%m%d%H%M%S')
-        filename = f"{P_ID}_{end_date}_reverse_geocode_results.jsonl"
-        
-        with open(filename, "w") as file:
-            for result in reverse_geocode_results:
-                file.write(json.dumps(result) + "\n")
-
-    # Display the updated cluster information
-    if len(coordinates) > 0 and cluster:
-        print("Cluster Centers (Updated):")
-        for cluster_data in cluster:
-            if len(cluster_data) == 6:  # Must have exactly 6 elements
-                cluster_id, center_lat, center_lon, num_points, place, distance_from_home = cluster_data
-                print(f"Cluster {cluster_id}: Center Lat = {center_lat:.6f}, Center Lon = {center_lon:.6f}, N = {num_points}, Place = {place}, Distance = {distance_from_home:.1f}m")
-
-
-    # Generate descriptions for locations based on clustering results
-    # Reconstruct points data for describe_locations_integrated function
-    # Create all_points structure: [latitude, longitude, datetime_string, speed]
-    if len(coordinates) > 0 and len(cluster_labels) > 0 and cluster:
-        # Reconstruct all_points with the correct structure for describe_locations_integrated
-        reconstructed_points = []
-        for i in range(len(coordinates)):
-            lat, lon = coordinates[i]
-            dt_str = datetimes[i] if isinstance(datetimes[i], str) else str(datetimes[i])
-            speed = speeds[i]
-            reconstructed_points.append([lat, lon, dt_str, speed])
-        
-        reconstructed_points = np.array(reconstructed_points, dtype=object)
-        
-        # Initialize locations narrative list
-        if "locations" not in sensor_narratives:
-            sensor_narratives["locations"] = []
-        
-        # Generate integrated location descriptions
-        location_narratives = describe_locations_integrated(
-            reconstructed_points, cluster_labels, cluster, 
-            START_TIMESTAMP, END_TIMESTAMP, sessions
-        )
-        
-        if location_narratives:
-            sensor_narratives["locations"].extend(location_narratives)
-
-    all_narratives = []
+            print(f"Error processing participant {P_ID}: {e}")
+            failed_participants.append(P_ID)
     
-    #load all narrative lists
-    for sensor_name, sensor_narrative_list in sensor_narratives.items():
-        for item in sensor_narrative_list:
-            all_narratives.append(item)
-
-    # Write output description to a text file
-    print("Output description into text file...")
-    # Remove duplicates first, then sort by time window and sensor order
-    unique_narratives = list(set(all_narratives))
-    all_narratives = sort_narratives_by_time_window_and_sensor_order(unique_narratives)
-    text = "\n".join([str(item[1]) for item in all_narratives])
-
-    # Remove system UI entries if required
-    if DISCARD_SYSTEM_UI:
-        cleaned_narrative_list = [x for x in all_narratives if "System UI" not in x[1]]
-        text = "\n".join([str(item[1]) for item in cleaned_narrative_list])
-        
-    # Save to file
-    with open(output_file, 'w') as file:
-        file.write(text)
-        
-    # Split description by days and save each day's content to separate files
-    daily_output_dir = os.path.join(os.path.dirname(output_file), "daily_output")
-    output_files = split_description_by_days(output_file, daily_output_dir)
-    print(f"Split description into {len(output_files)} daily files in {daily_output_dir}")
+    # Print summary
+    print(f"\n{'='*60}")
+    print("PROCESSING SUMMARY")
+    print(f"{'='*60}")
+    print(f"Successfully processed: {len(successful_participants)} participants")
+    if successful_participants:
+        print(f"  - {', '.join(successful_participants)}")
+    
+    print(f"Failed to process: {len(failed_participants)} participants")
+    if failed_participants:
+        print(f"  - {', '.join(failed_participants)}")
+    
+    print(f"\nTotal participants: {len(P_IDs)}")
+    print("Sensor narration completed!")
