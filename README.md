@@ -121,7 +121,7 @@ night_time_end: 6 # End of nighttime (24-hour format)
 
 #### Data Source Parameters:
 - **`pid_to_deviceid_map`**: CSV file mapping participant IDs to device IDs
-- **`P_ID`**: Participant ID to process
+- **`P_IDs`**: List of Participant IDs to process
 - **`START_TIME` / `END_TIME`**: Time range for data processing (YYYY-MM-DD HH:MM:SS format)
 - **`timezone`**: Timezone for timestamp conversion (e.g., "Australia/Melbourne")
 - **`input_directory`**: Path to participant data folder (supports {P_ID} placeholder)
