@@ -4,6 +4,9 @@
     - Implemented daily splitation
     - Support mulitple participants
     - Make sure using utf-8 when reading and writing to handle emojis
+    - Update notification description to display text properly
+    - Update keyboard description to more human-readable.
+
 - Updated config.yaml to replace P_ID by P_IDs
 
 2025-07-07
