@@ -355,8 +355,9 @@ def process_participant(P_ID):
         #save reverse geocoding results to a jsonl file with prefix to participant id
 
         # Parse the full END_TIME
+        start_date = datetime.strptime(START_TIME, '%Y-%m-%d %H:%M:%S').strftime('%Y%m%d%H%M%S')
         end_date = datetime.strptime(END_TIME, '%Y-%m-%d %H:%M:%S').strftime('%Y%m%d%H%M%S')
-        filename = f"{P_ID}_{end_date}_reverse_geocode_results.jsonl"
+        filename = f"{P_ID}_{start_date}_{end_date}_reverse_geocode_results.jsonl"
         
         with open(filename, "w", encoding='utf-8') as file:
             for result in reverse_geocode_results:

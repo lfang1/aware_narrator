@@ -6,8 +6,11 @@
     - Make sure using utf-8 when reading and writing to handle emojis
     - Update notification description to display text properly
     - Update keyboard description to more human-readable.
+    - Updated reverse geocoding saved file name to include start date.
 
-- Updated config.yaml to replace P_ID by P_IDs
+- Update README.md
+
+- Updated config.yaml
 
 2025-07-07
 - Added aware_narrator.py, extract_sessions.py, split_description, json2jsonl.py, map_pid_deviceid.py
