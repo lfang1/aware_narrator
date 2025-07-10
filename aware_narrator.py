@@ -70,6 +70,8 @@ min_samples = CONFIG["min_samples"]
 DISCARD_SYSTEM_UI = CONFIG["DISCARD_SYSTEM_UI"]
 night_time_start = CONFIG["night_time_start"]
 night_time_end = CONFIG["night_time_end"]
+location_minimum_data_points = CONFIG.get("location_minimum_data_points", 3)  # Minimum location data points to display a location
+location_minimum_stay_minutes = CONFIG.get("location_minimum_stay_minutes", 5)  # Minimum stay duration to display a location
 
 blacklist_apps = CONFIG["blacklist_apps"]
 whitelist_system_apps = CONFIG["whitelist_system_apps"]
@@ -400,7 +402,36 @@ def process_participant(P_ID):
                     distance_from_home
                 )
 
+                    
+                # # Process the reverse geocoding data
+                # reverse_geocode_results.append(reverse_geocode_data)
+                # data = reverse_geocode_data.get("results")[0] # get the most relevant result
+                # formatted_address = data.get("formatted_address", "")
 
+                # # Extract place information from address components
+                # place_type = ""
+                # place_name = ""
+                # for component in data.get("address_components", []):
+                #     if isinstance(component, dict) and component.get("types"):
+                #         types_list = component["types"]
+                #         if types_list and len(types_list) > 0:
+                #             place_type = types_list[0] or ""
+                #         place_name = component.get('long_name', '')
+                #         break
+
+                # # Combine strings with proper spacing, filtering out empty strings
+                # parts = [part for part in [place_type, place_name, formatted_address] if part.strip()]
+                # geocoded_place = ", ".join(parts)
+                
+                # # If this is the home cluster, keep "home" label and append geocoded result
+                # if place == "home":
+                #     updated_place = f"home, {geocoded_place}"
+                # else:
+                #     # For unknown places, replace with geocoded result
+                #     updated_place = geocoded_place
+
+                # # Update cluster data while preserving distance information
+                # cluster[idx] = (cluster_id, center_lat, center_lon, num_points, updated_place, distance_from_home)
         except Exception as e:
             print(f"Error in Google Maps API request: {e}")
         
@@ -1309,6 +1340,7 @@ def describe_locations_integrated(all_points, cluster_labels, cluster, start_tim
         if not window_data:
             return None
         
+        
         # Sort window data by timestamp
         sorted_data = sorted(window_data, key=lambda x: x['timestamp'])
         
@@ -1320,12 +1352,18 @@ def describe_locations_integrated(all_points, cluster_labels, cluster, start_tim
         # Use timestamp-based calculation for more accurate location stay times
         location_visits = calculate_location_stay_times_from_timestamps(sorted_data, window_start, window_end)
         
-        # Build sequence using only the label
+        # Build sequence using only the filtered locations (not raw data)
+        # First, get the set of valid location names that passed the threshold
+        valid_location_names = set(location_visits.keys())
+        
+        # Build sequence from raw data but only include valid locations
         sequence_labels = []
         for record in sorted_data:
             lbl = record["place_name"]
-            if not sequence_labels or sequence_labels[-1] != lbl:
-                sequence_labels.append(lbl)
+            # Only include locations that passed the threshold
+            if lbl in valid_location_names:
+                if not sequence_labels or sequence_labels[-1] != lbl:
+                    sequence_labels.append(lbl)
         
         # Generate description for this window
         description_parts = [f"{datetime_str} | locations | Location Analysis"]
@@ -1353,21 +1391,41 @@ def describe_locations_integrated(all_points, cluster_labels, cluster, start_tim
                                  key=lambda x: x[1]['estimated_time_seconds'], 
                                  reverse=True)
         
+        if not sorted_locations:
+            description_parts.append(f"    - No significant locations detected (insufficient data points)")
+            return '\n'.join(description_parts)
+        
         description_parts.append(f"    - Time spent at locations:")
         
         for place_label, stats in sorted_locations:
             # 1) bullet with label & time
-            tmins = stats["estimated_time_minutes"]
-            if tmins >= 60:
-                hrs, mins = divmod(int(tmins), 60)
-                time_str = f"{hrs}h {mins}min" if mins else f"{hrs}h"
-            elif tmins >= 1:
-                time_str = f"{int(tmins)}min"
+            total_seconds = stats["estimated_time_seconds"]
+            if total_seconds >= 3600:  # 1 hour
+                hrs = int(total_seconds // 3600)
+                mins = int((total_seconds % 3600) // 60)
+                time_str = f"{hrs}h {mins}m" if mins else f"{hrs}h"
+            elif total_seconds >= 60:
+                mins = int(total_seconds // 60)
+                secs = int(total_seconds % 60)
+                time_str = f"{mins}m {secs}s" if secs > 0 else f"{mins}m"
             else:
-                time_str = f"{int(stats['estimated_time_seconds'])}s"
+                time_str = f"{int(total_seconds)}s"
 
             visits = stats.get("visit_count", 1)
-            suffix = f" ({visits} visits)" if visits > 1 else ""
+            visit_periods = stats.get('visit_periods', [])
+            
+            # For single visits, show the time period inline
+            if visits == 1 and visit_periods:
+                period = visit_periods[0]
+                # Convert timestamps to datetime for display
+                start_dt = pd.to_datetime(period['start_time'], unit='ms', utc=True).tz_convert(timezone)
+                end_dt = pd.to_datetime(period['end_time'], unit='ms', utc=True).tz_convert(timezone)
+                start_time_str = start_dt.strftime('%H:%M:%S')
+                end_time_str = end_dt.strftime('%H:%M:%S')
+                suffix = f" ({start_time_str} - {end_time_str})"
+            else:
+                suffix = f" ({visits} visits)" if visits > 1 else ""
+            
             description_parts.append(f"         - {place_label}: {time_str}{suffix}")
 
             # 2) now dump your saved human‐sentence and address
@@ -1385,7 +1443,7 @@ def describe_locations_integrated(all_points, cluster_labels, cluster, start_tim
                 if info["distance"] > 0:
                     description_parts.append(f"              Distance from home: {info['distance']:.1f}m")
             
-            # Show individual visit periods if there are multiple visits
+            # Show individual visit periods only for multiple visits
             visit_periods = stats.get('visit_periods', [])
             if len(visit_periods) > 1:
                 description_parts.append(f"              Visit periods:")
@@ -1397,7 +1455,7 @@ def describe_locations_integrated(all_points, cluster_labels, cluster, start_tim
                         if period_secs > 0:
                             period_time_str = f"{period_mins}m {period_secs}s"
                         else:
-                            period_time_str = f"{period_mins}min" # use min to avoid confusion with meters
+                            period_time_str = f"{period_mins}m" # use min to avoid confusion with meters
                     else:
                         period_time_str = f"{int(period_duration)}s"
                     
@@ -1473,6 +1531,7 @@ def process_sensor_by_timewindow(sensor_data, sensor_name, start_timestamp, end_
             if current_window_start <= record['timestamp'] < current_window_end
         ]
         
+
         if not window_data:
             current_window_start = current_window_end
             continue
@@ -1765,8 +1824,16 @@ def describe_bluetooth_integrated(sensor_data, sensor_name, start_timestamp, end
             description_parts.append(f"    - Average named devices: {avg_named_devices:.1f} (range: {min_named_devices}-{max_named_devices}, from {gate_time_window}-min gate scans)")
         
         if averaged_devices:
-            description_parts.append(f"    - {len(averaged_devices)} named devices (by average detection frequency from {gate_time_window}-min gate scans):")
-            for device in averaged_devices:
+            # Limit to top 10 devices
+            top_devices = averaged_devices[:10]
+            total_devices = len(averaged_devices)
+            
+            if total_devices > 10:
+                description_parts.append(f"    - Top 10 of {total_devices} named devices (by average detection frequency from {gate_time_window}-min gate scans):")
+            else:
+                description_parts.append(f"    - {total_devices} named devices (by average detection frequency from {gate_time_window}-min gate scans):")
+            
+            for device in top_devices:
                 description_parts.append(
                     f"         - {device['display_name']} "
                     f"({device['avg_detections']:.1f} detections)"
@@ -3979,7 +4046,7 @@ def perform_dbscan_clustering(coordinates, datetimes, eps, min_samples, use_dail
                     daily_datetimes.append(dt_str)
             
             if len(daily_coordinates) >= min_samples:
-                print(f"Day {day_counter}: {period_start.strftime('%Y-%m-%d %H:%M')} to {period_end.strftime('%Y-%m-%d %H:%M')} ({duration_hours:.1f}h) - {len(daily_coordinates)} points")
+                print(f"Day {day_counter}: {period_start.strftime('%Y-%m-%d %H:%M:%S')} to {period_end.strftime('%Y-%m-%d %H:%M:%S')} ({duration_hours:.1f}h) - {len(daily_coordinates)} points")
                 
                 # Perform clustering for this day
                 daily_coordinates = np.array(daily_coordinates)
@@ -4025,7 +4092,7 @@ def perform_dbscan_clustering(coordinates, datetimes, eps, min_samples, use_dail
                             all_cluster_labels.append(-1)
                         all_cluster_labels[global_idx] = adjusted_labels[i]
             else:
-                print(f"Day {day_counter}: {period_start.strftime('%Y-%m-%d %H:%M')} to {period_end.strftime('%Y-%m-%d %H:%M')} ({duration_hours:.1f}h) - {len(daily_coordinates)} points (insufficient for clustering)")
+                print(f"Day {day_counter}: {period_start.strftime('%Y-%m-%d %H:%M:%S')} to {period_end.strftime('%Y-%m-%d %H:%M:%S')} ({duration_hours:.1f}h) - {len(daily_coordinates)} points (insufficient for clustering)")
             
             day_counter += 1
         
@@ -4138,27 +4205,82 @@ def calculate_location_stay_times_from_timestamps(sorted_data, window_start, win
         # Add to total time
         location_visits[location]['total_time_seconds'] += duration
     
-    # Convert to minutes and handle edge cases
+    # Identify locations that will be filtered out
+    locations_to_filter = set()
     for place_name, stats in location_visits.items():
+        # Filter based on minimum data points
+        if stats['data_points'] < location_minimum_data_points:
+            locations_to_filter.add(place_name)
+        # Also filter based on minimum stay duration
+        elif stats['total_time_seconds'] < (location_minimum_stay_minutes * 60):
+            locations_to_filter.add(place_name)
+    
+    # Merge periods for locations that will remain, accounting for filtered locations
+    if locations_to_filter:
+        #print(f"Will filter out locations: {', '.join(locations_to_filter)}") #Uncomment to see the locations that are being filtered out
+        
+        # For each location that will remain, merge its periods if there are filtered locations between them
+        for place_name, stats in location_visits.items():
+            if place_name not in locations_to_filter and len(stats['visit_periods']) > 1:
+                # Sort periods by start time
+                sorted_periods = sorted(stats['visit_periods'], key=lambda x: x['start_time'])
+                
+                # Merge all periods into one continuous period (since filtered locations are between them)
+                earliest_start = sorted_periods[0]['start_time']
+                latest_end = max(period['end_time'] for period in sorted_periods)
+                
+                # Create a single merged period
+                merged_period = {
+                    'start_time': earliest_start,
+                    'end_time': latest_end,
+                    'duration_seconds': (latest_end - earliest_start) / 1000.0
+                }
+                
+                # Update stats
+                stats['visit_periods'] = [merged_period]
+                stats['visit_count'] = 1  # Now it's one continuous visit
+                
+                # Recalculate total time from the merged period
+                total_time = merged_period['duration_seconds']
+                stats['total_time_seconds'] = total_time
+    
+    # Now filter out locations with insufficient data points
+    filtered_location_visits = {}
+    filtered_count = 0
+    for place_name, stats in location_visits.items():
+        if place_name not in locations_to_filter:
+            filtered_location_visits[place_name] = stats
+        else:
+            filtered_count += 1
+
+    #Uncomment to see the locations that are being filtered out
+            # if stats['data_points'] < location_minimum_data_points:
+            #     print(f"Filtering out location '{place_name}' with only {stats['data_points']} data points (threshold: {location_minimum_data_points})")
+            # elif stats['total_time_seconds'] < (location_minimum_stay_minutes * 60):
+            #     print(f"Filtering out location '{place_name}' with only {stats['total_time_seconds']:.1f}s stay time (minimum: {location_minimum_stay_minutes} minutes)")
+    
+    #Uncomment to see the number of locations that are being filtered out
+    # if filtered_count > 0:
+    #     print(f"Filtered out {filtered_count} locations with insufficient data points or stay time")
+    
+    # Convert to minutes for remaining locations and filter out data quality issues
+    final_location_visits = {}
+    for place_name, stats in filtered_location_visits.items():
         total_seconds = stats['total_time_seconds']
         
-        # Handle edge cases
+        # With multiple data points, we should always have a valid time span
+        # If total_seconds is 0, it indicates a data quality issue (same timestamps)
         if total_seconds <= 0:
-            # If no time calculated (single data point), estimate based on sampling interval
-            if len(sorted_data) > 1:
-                # Estimate average sampling interval
-                total_window_seconds = (window_end - window_start) / 1000.0
-                estimated_interval = total_window_seconds / len(sorted_data)
-                stats['estimated_time_seconds'] = estimated_interval * stats['data_points']
-            else:
-                # Single data point - assume 5 minutes minimum
-                stats['estimated_time_seconds'] = 300
+            print(f"Warning: Location '{place_name}' has {stats['data_points']} data points but zero time span - possible data quality issue")
+            print(f"  Visit periods: {stats.get('visit_periods', [])}")
+            print(f"  Skipping location due to zero time span")
+            continue
         else:
             stats['estimated_time_seconds'] = total_seconds
-        
-        stats['estimated_time_minutes'] = stats['estimated_time_seconds'] / 60.0
+            stats['estimated_time_minutes'] = total_seconds / 60.0
+            final_location_visits[place_name] = stats
     
-    return location_visits
+    return final_location_visits
 
 # Dictionary to store message traces and keep track of unique IDs
 message_traces = {}
@@ -4879,8 +5001,16 @@ def describe_wifi_combined_integrated(sensor_wifi_data, wifi_data, start_timesta
             description_parts.append(f"    - Average named networks: {avg_named_networks:.1f} (range: {min_named_networks}-{max_named_networks}, from {gate_time_window}-min gate scans)")
         
         if averaged_networks:
-            description_parts.append(f"    - {len(averaged_networks)} named networks (by average detection frequency from {gate_time_window}-min gate scans):")
-            for network in averaged_networks:
+            # Limit to top 10 networks
+            top_networks = averaged_networks[:10]
+            total_networks = len(averaged_networks)
+            
+            if total_networks > 10:
+                description_parts.append(f"    - Top 10 of {total_networks} named networks (by average detection frequency from {gate_time_window}-min gate scans):")
+            else:
+                description_parts.append(f"    - {total_networks} named networks (by average detection frequency from {gate_time_window}-min gate scans):")
+            
+            for network in top_networks:
                 description_parts.append(
                     f"         - {network['display_name']} "
                     f"({network['avg_detections']:.1f} detections)"
