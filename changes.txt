@@ -1,3 +1,10 @@
+2025-07-10
+- Updated sensor_narrator.py
+    - Location: 
+        - Includec days without nighttime points
+        - Implement address descriptors
+        - Better readability
+
 2025-07-09
 - Updated sensor_narrator.py
     - Location: clean up redundant code; allows skip when no location data avaliable.
