@@ -57,7 +57,7 @@ sensors:
 
 DISCARD_SYSTEM_UI: true # Applied to 'applications_foreground', 'applications_notifications', 'installations' based on system_ui_apps
 GOOGLE_MAP_KEY: "" # Used for Google API Reverse geocoding
-eps: 0.000047  # DBSCAN clustering parameter: ~50m radius (0.000047 radians × 6371000 m ≈ 300m)
+eps: 0.000047  # DBSCAN clustering parameter: radians (0.000047 radians × 6371000 m ≈ 300m)
 min_samples: 3  # DBSCAN clustering parameter: mininum number of points to form a cluster
 
 location_minimum_data_points: 3 # Minimum number of location data points to display a place in location description
